@@ -145,9 +145,9 @@ afterEach(() => {
   });
 });
 
-describe("mmp-map", () => {
-  it("is registered as mmp-map", () => {
-    expect(customElements.get("mmp-map")).toBe(MowMap);
+describe("mow-planner-map", () => {
+  it("is registered as mow-planner-map", () => {
+    expect(customElements.get("mow-planner-map")).toBe(MowMap);
   });
 
   it("renders no svg without a model", async () => {

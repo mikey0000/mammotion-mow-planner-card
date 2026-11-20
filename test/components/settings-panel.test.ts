@@ -47,7 +47,7 @@ async function mount(
   { settings: s = {}, limits: l = {} }: Overrides = {},
   extra: Partial<MowSettingsPanel> = {},
 ) {
-  const el = document.createElement("mmp-settings");
+  const el = document.createElement("mow-planner-settings");
   Object.assign(el, { settings: { ...settings, ...s }, limits: { ...limits, ...l }, ...extra });
   document.body.append(el);
   await el.updateComplete;
@@ -71,7 +71,9 @@ const one = <E extends Element>(root: ParentNode, selector: string, type: abstra
 };
 
 const radiogroups = (el: Element) =>
-  [...shadow(el).querySelectorAll("mmp-segmented")].map((s) => one(shadow(s), "[role=radiogroup]", Element));
+  [...shadow(el).querySelectorAll("mow-planner-segmented")].map((s) =>
+    one(shadow(s), "[role=radiogroup]", Element),
+  );
 
 const group = (el: Element, label: string) => {
   const found = radiogroups(el).find((g) => g.getAttribute("aria-label") === label);
@@ -87,7 +89,7 @@ const radio = (el: Element, groupLabel: string, label: string) => {
   return found;
 };
 
-const sliders = (el: Element) => [...shadow(el).querySelectorAll("mmp-slider")].map(shadow);
+const sliders = (el: Element) => [...shadow(el).querySelectorAll("mow-planner-slider")].map(shadow);
 
 const labelOf = (slider: ShadowRoot) => one(slider, "label", Element).textContent.trim();
 
@@ -110,7 +112,7 @@ const drag = (input: HTMLInputElement, value: string) => {
 };
 
 const rowValue = (el: Element, label: string) => {
-  const host = [...shadow(el).querySelectorAll("mmp-segmented")].find(
+  const host = [...shadow(el).querySelectorAll("mow-planner-segmented")].find(
     (s) => one(shadow(s), "[role=radiogroup]", Element).getAttribute("aria-label") === label,
   );
   if (!host) throw new Error(`no segmented "${label}"`);
@@ -126,7 +128,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-describe("<mmp-settings> rendering", () => {
+describe("<mow-planner-settings> rendering", () => {
   it("offers the patterns in app order with labels", async () => {
     const { el } = await mount();
     expect(radios(group(el, "Pattern")).map((r) => r.getAttribute("aria-label"))).toEqual([
@@ -209,7 +211,7 @@ describe("<mmp-settings> rendering", () => {
     const details = one(shadow(el), "details", HTMLDetailsElement);
     expect(details.open).toBe(false);
     expect(one(details, "summary", Element).textContent).toContain("More settings");
-    expect([...details.querySelectorAll("mmp-slider, mmp-segmented")]).toHaveLength(3);
+    expect([...details.querySelectorAll("mow-planner-slider, mow-planner-segmented")]).toHaveLength(3);
   });
 
   it("snaps a stored edge distance to the nearest choice", async () => {
@@ -242,7 +244,7 @@ describe("<mmp-settings> rendering", () => {
   });
 });
 
-describe("<mmp-settings> visibility", () => {
+describe("<mow-planner-settings> visibility", () => {
   it("shows the crossing angle only for checkerboard", async () => {
     expect(sliderLabels((await mount()).el)).not.toContain("Crossing angle");
     expect(sliderLabels((await mount({ settings: { pattern: "double_grid" } })).el)).toContain(
@@ -266,7 +268,7 @@ describe("<mmp-settings> visibility", () => {
   });
 });
 
-describe("<mmp-settings> interaction", () => {
+describe("<mow-planner-settings> interaction", () => {
   const changesOnly = (events: MowSettings[], change: Partial<MowSettings>) => {
     expect(events).toEqual([{ ...settings, ...change }]);
   };
@@ -353,9 +355,9 @@ describe("<mmp-settings> interaction", () => {
     slider(el, "Speed").increase.click();
     drag(slider(el, "Angle").input, "10");
     expect(events).toEqual([]);
-    const controls = [...shadow(el).querySelectorAll("mmp-slider, mmp-segmented")].flatMap((c) => [
-      ...shadow(c).querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input"),
-    ]);
+    const controls = [...shadow(el).querySelectorAll("mow-planner-slider, mow-planner-segmented")].flatMap(
+      (c) => [...shadow(c).querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input")],
+    );
     expect(controls.length).toBeGreaterThan(0);
     expect(controls.every((c) => c.disabled)).toBe(true);
   });

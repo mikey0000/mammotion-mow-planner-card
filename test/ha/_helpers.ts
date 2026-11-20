@@ -27,11 +27,14 @@ export function device(id: string, name: string, nameByUser: string | null = nul
   return { id, name, name_by_user: nameByUser, model: null };
 }
 
-/** `respond` decides each call's outcome: a value resolves as `{response}`, a thrown error rejects. */
+/**
+ * `respond` decides each call's outcome: a value (or a promise of one) resolves as `{response}`,
+ * a thrown error or rejected promise rejects.
+ */
 export function makeHass(
   entities: readonly FakeEntity[],
   devices: readonly DeviceRegistryEntry[] = [],
-  respond: (service: string) => unknown = () => undefined,
+  respond: (service: string, call: ServiceCall) => unknown = () => undefined,
 ): FakeHass {
   const calls: ServiceCall[] = [];
   const states: Record<string, HassEntity> = {};
@@ -64,8 +67,9 @@ export function makeHass(
       notifyOnError?: boolean,
       returnResponse?: boolean,
     ): Promise<ServiceCallResponse<T>> {
-      calls.push({ domain, service, data, target, notifyOnError, returnResponse });
-      return Promise.resolve().then(() => ({ response: respond(service) as T }));
+      const call = { domain, service, data, target, notifyOnError, returnResponse };
+      calls.push(call);
+      return Promise.resolve().then(async () => ({ response: (await respond(service, call)) as T }));
     },
   };
 }

@@ -1,7 +1,8 @@
+import { defineOnce } from "../define";
 import Panzoom, { type PanzoomEventDetail, type PanzoomObject } from "@panzoom/panzoom";
 import { mdiFitToScreenOutline, mdiFlash, mdiMinus, mdiPlus } from "@mdi/js";
 import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
-import { customElement, property, query, state } from "lit/decorators.js";
+import { property, query, state } from "lit/decorators.js";
 import type { AreaPreview, MapModel, Marker, Point, Zone } from "../model";
 import { controlStyles } from "../styles";
 import { labelPosition } from "../geo/label";
@@ -60,7 +61,6 @@ const PAN_KEYS: Partial<Record<string, readonly [number, number]>> = {
   ArrowDown: [0, -PAN_STEP_PX],
 };
 
-@customElement("mmp-map")
 export class MowMap extends LitElement {
   @property({ attribute: false }) model?: MapModel;
   @property({ attribute: false }) selected: readonly number[] = [];
@@ -475,3 +475,5 @@ export class MowMap extends LitElement {
     `,
   ];
 }
+
+defineOnce("mow-planner-map", MowMap);

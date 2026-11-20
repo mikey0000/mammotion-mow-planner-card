@@ -7,7 +7,7 @@ export const controlStyles = css`
     --mmp-radius: var(--ha-border-radius-lg, 12px);
     --mmp-accent: var(--primary-color, #03a9f4);
     --mmp-surface: color-mix(in srgb, var(--primary-text-color, #212121) 6%, transparent);
-    --mmp-tint: color-mix(in srgb, var(--mmp-accent) 20%, transparent);
+    --mmp-tint: color-mix(in srgb, var(--mmp-accent) 28%, transparent);
     color: var(--primary-text-color, #212121);
     font-family: var(--ha-font-family-body, Roboto, Noto, sans-serif);
     font-size: var(--ha-font-size-m, 14px);

@@ -1,6 +1,7 @@
+import { defineOnce } from "../define";
 import { mdiMinus, mdiPlus } from "@mdi/js";
 import { css, html, LitElement } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { property } from "lit/decorators.js";
 import { live } from "lit/directives/live.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { localize } from "../localize";
@@ -15,7 +16,6 @@ const snap = (value: number, { min, max, step }: Range) =>
   Number(Math.min(max, Math.max(min, min + Math.round((value - min) / step) * step)).toFixed(decimals(step)));
 
 /** Labelled range with − / + steppers, its track filled from `origin` (default: the minimum) to the value; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
-@customElement("mmp-slider")
 export class SliderControl extends LitElement {
   @property() label = "";
   @property({ type: Number }) value = 0;
@@ -161,8 +161,10 @@ export class SliderControl extends LitElement {
   }
 }
 
+defineOnce("mow-planner-slider", SliderControl);
+
 declare global {
   interface HTMLElementTagNameMap {
-    "mmp-slider": SliderControl;
+    "mow-planner-slider": SliderControl;
   }
 }

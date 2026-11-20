@@ -1,4 +1,11 @@
-import { mdiAlertOutline, mdiBattery, mdiCheckCircleOutline, mdiPlay, mdiRefresh } from "@mdi/js";
+import {
+  mdiAlertOutline,
+  mdiBattery,
+  mdiCheckCircleOutline,
+  mdiMapMarkerOffOutline,
+  mdiPlay,
+  mdiRefresh,
+} from "@mdi/js";
 import { css, html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { state } from "lit/decorators.js";
 import "./components/map-view";
@@ -6,18 +13,21 @@ import "./components/settings-panel";
 import { mdiIcon } from "./components/icons";
 import type { MapStrings } from "./components/map-view";
 import { CARD_TYPE, configForm, normalizeConfig, stubConfig, type CardConfig } from "./config";
+import { defineOnce } from "./define";
 import { previewArea } from "./geo/preview";
 import { projectMap, projectPosition } from "./geo/project";
 import {
   fetchMap,
   fetchPlannedRoute,
   findMowers,
+  mowerName,
   readMower,
   requestPlannedRoute,
   startMow,
   startMowData,
   type AreaSwitch,
   type Mower,
+  type SettingName,
 } from "./ha/mower";
 import type { HomeAssistant } from "./ha/types";
 import { isRtl, localize, type StringKey } from "./localize";
@@ -30,12 +40,25 @@ type Step = (typeof STEPS)[number];
 type MapState =
   { readonly status: "loading" | "empty" | "error" } | { readonly status: "ready"; readonly model: MapModel };
 
-type StartState = "idle" | "confirming" | "sending" | "sent" | "failed";
+/** What the user was shown when asked to confirm; exactly this is sent. */
+interface Plan {
+  readonly mower: Mower;
+  readonly data: Record<string, unknown>;
+  readonly summary: string;
+  readonly planOnly: boolean;
+}
+
+type Request =
+  | { readonly status: "idle" }
+  | { readonly status: "confirming"; readonly plan: Plan; readonly armed: boolean }
+  | { readonly status: "sending" | "sent" | "failed"; readonly plan: Plan };
 
 type RouteState =
   | { readonly status: "idle" | "loading" | "unavailable" }
   | { readonly status: "ready"; readonly lines: readonly (readonly Point[])[] };
 
+const IDLE = { status: "idle" } as const;
+const KNOWN_STATES = ["mowing", "paused", "returning", "docked", "idle", "error"] as const;
 const ACTIVE_STATES: readonly string[] = ["mowing", "paused", "returning"];
 const OFFLINE_STATES: readonly string[] = ["unavailable", "unknown"];
 const ROUTE_POLL_MS = 2000;
@@ -59,31 +82,27 @@ export class MowPlannerCard extends LitElement {
   @state() private editedSettings?: MowSettings;
   @state() private map: MapState = { status: "loading" };
   @state() private previews: readonly AreaPreview[] = [];
-  @state() private route: RouteState = { status: "idle" };
-  @state() private start: StartState = "idle";
-  @state() private confirmArmed = false;
+  @state() private route: RouteState = IDLE;
+  @state() private request: Request = IDLE;
 
   private latestHass?: HomeAssistant;
   private mowerSnapshot = "";
+  private previewKey = "";
+  private armTimer?: ReturnType<typeof setTimeout>;
+  private latestMapLoad = 0;
+  private hadFocus = false;
+  private readonly loadedMaps = new Map<string, MapState>();
 
   setConfig(config: unknown): void {
     this.config = normalizeConfig(config);
-    if (this.latestHass) this.hass = this.latestHass;
+    this.syncMower();
   }
 
   set hass(hass: HomeAssistant) {
     this.latestHass = hass;
-    this.language = hass.locale?.language ?? hass.language;
+    this.language = hass.language;
     this.dir = isRtl(hass) ? "rtl" : "ltr";
-    const offered = this.config?.entities?.filter((id) => id in hass.states) ?? findMowers(hass);
-    if (offered.join() !== this.mowerIds.join()) this.mowerIds = offered;
-    if (!this.mowerId || !offered.includes(this.mowerId)) this.mowerId = offered[0];
-    const mower = this.mowerId ? readMower(hass, this.mowerId) : undefined;
-    const snapshot = JSON.stringify(mower);
-    if (snapshot !== this.mowerSnapshot) {
-      this.mowerSnapshot = snapshot;
-      this.mower = mower;
-    }
+    this.syncMower();
   }
 
   getCardSize(): number {
@@ -92,6 +111,33 @@ export class MowPlannerCard extends LitElement {
 
   getGridOptions(): Record<string, number | string> {
     return { columns: 12, min_columns: 6, rows: "auto" };
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    clearTimeout(this.armTimer);
+    if (this.request.status === "confirming") this.request = IDLE;
+  }
+
+  /** Re-reads the chosen mower, keeping the choice while that mower still exists. */
+  private syncMower(): void {
+    const hass = this.latestHass;
+    if (!hass) return;
+    const offered = this.config?.entities ?? findMowers(hass);
+    if (offered.join() !== this.mowerIds.join()) this.mowerIds = offered;
+    const known = this.mowerId && (offered.includes(this.mowerId) || this.mowerId in hass.entities);
+    if (!known) this.mowerId = offered[0];
+    const mower = this.mowerId ? readMower(hass, this.mowerId) : undefined;
+    const snapshot = JSON.stringify(mower);
+    if (snapshot !== this.mowerSnapshot) {
+      this.mowerSnapshot = snapshot;
+      this.mower = mower;
+    }
+  }
+
+  private pickMower(mowerId: string): void {
+    this.mowerId = mowerId;
+    this.syncMower();
   }
 
   private get settings(): MowSettings | undefined {
@@ -104,28 +150,45 @@ export class MowPlannerCard extends LitElement {
     return this.pickedHashes.flatMap((hash) => areas.find((area) => area.hash === hash) ?? []);
   }
 
+  private get busy(): boolean {
+    return this.request.status === "sending" || this.route.status === "loading";
+  }
+
+  private get pathLengthM(): number {
+    return this.previews.reduce((sum, preview) => sum + preview.lengthM, 0);
+  }
+
   private get blocker(): StringKey | undefined {
     const { mower, settings } = this;
     if (!mower || OFFLINE_STATES.includes(mower.state)) return "warn.unavailable";
     if (this.selectedAreas.length === 0) return "warn.no_area";
-    if (settings?.pattern === "no_grid" && settings.perimeterLaps + settings.obstacleLaps === 0) {
-      return "warn.no_path";
-    }
-    return undefined;
+    if (settings?.pattern !== "no_grid") return undefined;
+    const nothingToMow = this.map.status === "ready" && this.pathLengthM === 0;
+    return nothingToMow || settings.perimeterLaps + settings.obstacleLaps === 0 ? "warn.no_path" : undefined;
   }
 
   private t(key: StringKey, vars?: Record<string, string | number>): string {
     return localize(this.language, key, vars);
   }
 
+  private num(value: number, maximumFractionDigits = 0): string {
+    return new Intl.NumberFormat(this.language, { maximumFractionDigits }).format(value);
+  }
+
   protected override willUpdate(changed: PropertyValues): void {
+    this.hadFocus = this.matches(":focus-within");
     if (changed.has("mowerId")) this.resetPlan();
-    const planChanged = ["pickedHashes", "editedSettings", "mower", "config"].some((key) => changed.has(key));
-    if (planChanged || changed.has("map")) this.previews = this.computePreviews();
+    this.refreshPreviews();
+    if (this.request.status === "confirming" && this.blocker) this.cancelConfirm();
   }
 
   protected override updated(changed: PropertyValues): void {
     if (changed.has("mowerId")) void this.loadMap();
+    if (changed.has("step") && this.getBoundingClientRect().top < 0) this.scrollIntoView({ block: "start" });
+    const moved = changed.has("step") || changed.has("request");
+    if (moved && this.hadFocus && !this.shadowRoot?.activeElement) {
+      this.shadowRoot?.querySelector<HTMLElement>("[data-focus]")?.focus();
+    }
   }
 
   private resetPlan(): void {
@@ -136,23 +199,38 @@ export class MowPlannerCard extends LitElement {
   }
 
   private forgetOutcome(): void {
-    this.route = { status: "idle" };
-    this.start = "idle";
+    if (this.busy) return;
+    this.cancelConfirm();
+    this.route = IDLE;
+    this.request = IDLE;
   }
 
-  private computePreviews(): AreaPreview[] {
-    const { settings } = this;
-    if (this.map.status !== "ready" || !settings) return [];
-    const { areas, obstacles } = this.map.model;
-    return this.selectedAreas.flatMap(({ hash }) => {
-      const area = areas.find((zone) => zone.hash === hash);
-      return area ? previewArea(area, obstacles, settings, this.config?.angle_offset) : [];
-    });
+  private refreshPreviews(): void {
+    const { settings, map } = this;
+    const hashes = this.selectedAreas.map((area) => area.hash);
+    const offset = this.config?.angle_offset ?? 0;
+    const model = map.status === "ready" ? map.model : undefined;
+    const key = JSON.stringify([hashes, settings, offset, model?.origin, model?.bounds]);
+    if (key === this.previewKey) return;
+    this.previewKey = key;
+    this.previews =
+      model && settings
+        ? hashes.flatMap((hash) => {
+            const area = model.areas.find((zone) => zone.hash === hash);
+            return area ? previewArea(area, model.obstacles, settings, offset) : [];
+          })
+        : [];
   }
 
-  private async loadMap(): Promise<void> {
+  private async loadMap(refresh = false): Promise<void> {
     const { mowerId, latestHass: hass } = this;
     if (!mowerId || !hass) return;
+    const loaded = refresh ? undefined : this.loadedMaps.get(mowerId);
+    if (loaded) {
+      this.map = loaded;
+      return;
+    }
+    const load = ++this.latestMapLoad;
     this.map = { status: "loading" };
     let map: MapState;
     try {
@@ -162,7 +240,8 @@ export class MowPlannerCard extends LitElement {
     } catch {
       map = { status: "error" };
     }
-    if (mowerId === this.mowerId) this.map = map;
+    if (map.status === "ready") this.loadedMaps.set(mowerId, map);
+    if (load === this.latestMapLoad) this.map = map;
   }
 
   /** The switches name unnamed areas differently from the map; the switches are what the user knows. */
@@ -175,70 +254,102 @@ export class MowPlannerCard extends LitElement {
   }
 
   private toggleArea(hash: number): void {
-    if (!this.mower?.areas.some((area) => area.hash === hash)) return;
+    if (this.busy || !this.mower?.areas.some((area) => area.hash === hash)) return;
     const hashes = this.selectedAreas.map((area) => area.hash);
     this.pickedHashes = hashes.includes(hash) ? hashes.filter((h) => h !== hash) : [...hashes, hash];
     this.forgetOutcome();
   }
 
   private toggleAll(): void {
-    const areas = this.mower?.areas ?? [];
-    this.pickedHashes = this.selectedAreas.length === areas.length ? [] : areas.map((area) => area.hash);
+    const all = (this.mower?.areas ?? []).map((area) => area.hash);
+    const picked = this.selectedAreas.map((area) => area.hash);
+    this.pickedHashes =
+      picked.length === all.length ? [] : [...picked, ...all.filter((hash) => !picked.includes(hash))];
     this.forgetOutcome();
   }
 
-  private editSettings(event: CustomEvent<{ settings: MowSettings }>): void {
-    this.editedSettings = event.detail.settings;
+  private editSettings(settings: MowSettings): void {
+    this.editedSettings = settings;
     this.forgetOutcome();
   }
 
   private goTo(step: Step): void {
+    if (this.busy) return;
     this.step = step;
-    if (this.start !== "sent") this.start = "idle";
+    if (this.request.status !== "sent") this.cancelConfirm();
   }
 
-  private async askToStart(): Promise<void> {
-    this.confirmArmed = false;
-    this.start = "confirming";
-    await wait(CONFIRM_ARM_MS);
-    this.confirmArmed = true;
+  private startOver(): void {
+    this.request = IDLE;
+    this.step = "areas";
   }
 
-  private async sendStart(): Promise<void> {
-    const { latestHass: hass, mower, settings } = this;
-    if (!hass || !mower || !settings || this.blocker || this.start !== "confirming") return;
-    this.start = "sending";
+  /** The settings to send: those an entity holds, plus those changed in the card. */
+  private get sentSettings(): SettingName[] {
+    const { mower, settings } = this;
+    if (!mower || !settings) return [];
+    const edited = (Object.keys(settings) as SettingName[]).filter(
+      (name) => settings[name] !== mower.settings[name],
+    );
+    return [...new Set([...mower.heldSettings, ...edited])];
+  }
+
+  private askToConfirm(planOnly: boolean): void {
+    const { mower, settings } = this;
+    if (!mower || !settings || this.blocker || this.busy) return;
+    if (planOnly && ACTIVE_STATES.includes(mower.state)) return;
+    const areas = this.selectedAreas.map((area) => area.entityId);
+    const plan: Plan = {
+      mower,
+      planOnly,
+      data: startMowData(settings, this.sentSettings, areas, planOnly),
+      summary: this.totals.join(" · "),
+    };
+    this.request = { status: "confirming", plan, armed: false };
+    clearTimeout(this.armTimer);
+    this.armTimer = setTimeout(() => {
+      if (this.request.status === "confirming") this.request = { ...this.request, armed: true };
+    }, CONFIRM_ARM_MS);
+  }
+
+  private cancelConfirm(): void {
+    clearTimeout(this.armTimer);
+    if (this.request.status === "confirming") this.request = IDLE;
+  }
+
+  private async sendConfirmed(): Promise<void> {
+    const { latestHass: hass, request } = this;
+    if (!hass || request.status !== "confirming" || !request.armed || this.blocker) return;
+    const { plan } = request;
+    this.request = { status: "sending", plan };
+    let sent = true;
     try {
-      await startMow(
-        hass,
-        mower.entityId,
-        startMowData(
-          settings,
-          this.selectedAreas.map((area) => area.entityId),
-        ),
-      );
-      this.start = "sent";
+      await startMow(hass, plan.mower.entityId, plan.data);
     } catch {
-      this.start = "failed";
+      sent = false;
+    }
+    if (sent && plan.planOnly) {
+      this.request = IDLE;
+      await this.loadRoute(hass, plan.mower.entityId);
+    } else {
+      this.request = { status: sent ? "sent" : "failed", plan };
     }
   }
 
-  private async loadRoute(): Promise<void> {
-    const { latestHass: hass, mower, settings, map } = this;
-    if (!hass || !mower || !settings || map.status !== "ready") return;
+  private async loadRoute(hass: HomeAssistant, mowerId: string): Promise<void> {
+    if (this.map.status !== "ready") return;
+    const { origin } = this.map.model;
     const loading: RouteState = { status: "loading" };
     this.route = loading;
     let route: RouteState = { status: "unavailable" };
     try {
-      const areas = this.selectedAreas.map((area) => area.entityId);
-      await startMow(hass, mower.entityId, startMowData(settings, areas, true));
-      await requestPlannedRoute(hass, mower.entityId);
+      await requestPlannedRoute(hass, mowerId);
       for (let poll = 0; poll < ROUTE_POLLS && this.route === loading && this.isConnected; poll++) {
         await wait(ROUTE_POLL_MS);
-        const geojson = await fetchPlannedRoute(hass, mower.entityId);
+        const geojson = await fetchPlannedRoute(hass, mowerId);
         const lines = geojson?.features.flatMap(({ geometry }) =>
           geometry.type === "LineString"
-            ? [geometry.coordinates.map(([lon = 0, lat = 0]) => projectPosition(map.model.origin, lon, lat))]
+            ? [geometry.coordinates.map(([lon = 0, lat = 0]) => projectPosition(origin, lon, lat))]
             : [],
         );
         if (lines?.length) {
@@ -261,9 +372,10 @@ export class MowPlannerCard extends LitElement {
       dock: this.t("map.dock"),
       mower: this.t("map.mower"),
       noGoZone: this.t("map.no_go_zone"),
+      everyNthPass: (n) => this.t("map.thinned", { n }),
       area: ({ name, areaM2, order }) =>
         [
-          this.t("map.area_label", { name, size: Math.round(areaM2) }),
+          this.t("map.area_label", { name, size: this.num(areaM2) }),
           ...(order ? [this.t("map.area_selected", { order })] : []),
         ].join(", "),
     };
@@ -276,14 +388,6 @@ export class MowPlannerCard extends LitElement {
       position: projectPosition(this.map.model.origin, position.lon, position.lat),
       ...(position.headingDeg !== undefined && { headingDeg: position.headingDeg }),
     };
-  }
-
-  private areaCount(count: number): string {
-    return count === 1 ? this.t("summary.area_one") : this.t("summary.areas", { count });
-  }
-
-  private get pathLengthM(): number {
-    return this.previews.reduce((sum, preview) => sum + preview.lengthM, 0);
   }
 
   private get duration(): string | undefined {
@@ -305,8 +409,10 @@ export class MowPlannerCard extends LitElement {
       0,
     );
     return [
-      this.areaCount(selected.length),
-      ...(size > 0 ? [this.t("summary.area_size", { size: Math.round(size) })] : []),
+      selected.length === 1
+        ? this.t("summary.area_one")
+        : this.t("summary.areas", { count: selected.length }),
+      ...(size > 0 ? [this.t("summary.area_size", { size: this.num(size) })] : []),
       ...(this.duration ? [this.duration] : []),
     ];
   }
@@ -329,30 +435,36 @@ export class MowPlannerCard extends LitElement {
     `;
   }
 
+  private renderIcon(path: string, kind = ""): TemplateResult {
+    return html`<svg class="icon ${kind}" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(path)}</svg>`;
+  }
+
   private renderHeader(mower: Mower): TemplateResult {
-    const stateKey = `state.${mower.state}`;
-    const stateText = stateKey in STATE_KEYS ? this.t(stateKey as StringKey) : this.t("state.unavailable");
-    const battery =
-      mower.battery === undefined
-        ? nothing
-        : html` ·
-            <svg class="icon inline" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(mdiBattery)}</svg>
-            ${this.t("mower.battery", { percent: Math.round(mower.battery) })}`;
+    const known = KNOWN_STATES.find((name) => name === mower.state);
+    const title = this.config?.title || (this.mowerIds.length < 2 ? mower.name : undefined);
     return html`
       <header>
         <div class="title">
-          ${this.config?.title || this.mowerIds.length < 2 ? html`<h2>${this.config?.title ?? mower.name}</h2>` : nothing}
+          ${title ? html`<h2>${title}</h2>` : nothing}
           ${this.mowerIds.length > 1 ? this.renderMowerPicker() : nothing}
-          <span class="secondary">${stateText}${battery}</span>
+          <span class="secondary">
+            ${this.t(known ? `state.${known}` : "state.unavailable")}
+            ${
+              mower.battery === undefined
+                ? nothing
+                : html` · ${this.renderIcon(mdiBattery, "inline")}
+                  ${this.t("mower.battery", { percent: this.num(mower.battery) })}`
+            }
+          </span>
         </div>
         <button
           class="icon-button"
           aria-label=${this.t("map.refresh")}
           title=${this.t("map.refresh")}
-          ?disabled=${this.map.status === "loading"}
-          @click=${() => void this.loadMap()}
+          ?disabled=${this.map.status === "loading" || this.busy}
+          @click=${() => void this.loadMap(true)}
         >
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(mdiRefresh)}</svg>
+          ${this.renderIcon(mdiRefresh)}
         </button>
       </header>
     `;
@@ -363,12 +475,15 @@ export class MowPlannerCard extends LitElement {
     return html`
       <select
         aria-label=${this.t("mower.pick")}
-        @change=${(event: Event) => (this.mowerId = (event.target as HTMLSelectElement).value)}
+        ?disabled=${this.busy}
+        @change=${(event: Event) => {
+          this.pickMower((event.target as HTMLSelectElement).value);
+        }}
       >
         ${this.mowerIds.map(
           (id) =>
             html`<option value=${id} ?selected=${id === this.mowerId}>
-              ${(hass && readMower(hass, id)?.name) ?? id}
+              ${hass ? mowerName(hass, id) : id}
             </option>`,
         )}
       </select>
@@ -377,34 +492,45 @@ export class MowPlannerCard extends LitElement {
 
   private renderMap(): TemplateResult {
     const { map } = this;
+    if (map.status !== "ready") {
+      return html`
+        <div class="map vacant" role="status">
+          ${map.status === "loading" ? nothing : this.renderIcon(mdiMapMarkerOffOutline)}
+          <p>
+            ${this.t(
+              map.status === "loading"
+                ? "map.loading"
+                : map.status === "empty"
+                  ? "map.unavailable"
+                  : "map.error",
+            )}
+          </p>
+          ${
+            map.status === "loading"
+              ? nothing
+              : html`<button class="text-button" @click=${() => void this.loadMap(true)}>
+                  ${this.t("map.retry")}
+                </button>`
+          }
+        </div>
+      `;
+    }
     const approximate = this.route.status !== "ready" && this.previews.some((p) => !p.directionExact);
     return html`
       <div class="map">
-        ${
-          map.status === "ready"
-            ? html`<mmp-map
-                .model=${map.model}
-                .selected=${this.selectedAreas.map((area) => area.hash)}
-                .previews=${this.previews}
-                .mower=${this.mowerMarker}
-                .route=${this.route.status === "ready" ? this.route.lines : undefined}
-                .strings=${this.mapStrings}
-                ?readonly=${this.step === "review"}
-                @area-toggle=${(event: CustomEvent<{ hash: number }>) => {
-                  this.toggleArea(event.detail.hash);
-                }}
-              ></mmp-map>`
-            : html`<p class="message" role="status">
-                ${this.t(
-                  map.status === "loading"
-                    ? "map.loading"
-                    : map.status === "empty"
-                      ? "map.unavailable"
-                      : "map.error",
-                )}
-              </p>`
-        }
-        ${approximate ? html`<p class="note secondary">${this.t("preview.approximate")}</p>` : nothing}
+        <mow-planner-map
+          .model=${map.model}
+          .selected=${this.selectedAreas.map((area) => area.hash)}
+          .previews=${this.previews}
+          .mower=${this.mowerMarker}
+          .route=${this.route.status === "ready" ? this.route.lines : undefined}
+          .strings=${this.mapStrings}
+          .note=${approximate ? this.t("preview.approximate") : undefined}
+          ?readonly=${this.step === "review" || this.busy}
+          @area-toggle=${(event: CustomEvent<{ hash: number }>) => {
+            this.toggleArea(event.detail.hash);
+          }}
+        ></mow-planner-map>
       </div>
     `;
   }
@@ -419,6 +545,7 @@ export class MowPlannerCard extends LitElement {
                 <button
                   class="step"
                   aria-current=${step === this.step ? "step" : "false"}
+                  ?disabled=${this.busy}
                   @click=${() => {
                     this.goTo(step);
                   }}
@@ -436,25 +563,27 @@ export class MowPlannerCard extends LitElement {
   private renderStep(mower: Mower): TemplateResult {
     if (this.step === "areas") return this.renderAreas(mower);
     if (this.step === "review") return this.renderReview(mower);
-    return html`<mmp-settings
+    return html`<mow-planner-settings
       .settings=${this.settings}
       .limits=${mower.limits}
       .language=${this.language}
+      .disabled=${this.busy}
       @settings-changed=${(event: CustomEvent<{ settings: MowSettings }>) => {
-        this.editSettings(event);
+        this.editSettings(event.detail.settings);
       }}
-    ></mmp-settings>`;
+    ></mow-planner-settings>`;
   }
 
   private renderAreas(mower: Mower): TemplateResult {
     if (mower.areas.length === 0) return html`<p class="secondary">${this.t("areas.none_available")}</p>`;
     const selected = this.selectedAreas;
     return html`
-      <p class="secondary hint">${this.t("areas.hint")}</p>
+      <p class="secondary hint">${this.t(this.map.status === "ready" ? "areas.hint" : "areas.hint_list")}</p>
       <div class="chips">
         <button
           class="chip"
           aria-pressed=${selected.length === mower.areas.length}
+          ?disabled=${this.busy}
           @click=${() => {
             this.toggleAll();
           }}
@@ -467,6 +596,7 @@ export class MowPlannerCard extends LitElement {
             <button
               class="chip"
               aria-pressed=${order > 0}
+              ?disabled=${this.busy}
               @click=${() => {
                 this.toggleArea(area.hash);
               }}
@@ -483,30 +613,32 @@ export class MowPlannerCard extends LitElement {
     const { settings } = this;
     if (!settings) return html``;
     const striped = settings.pattern !== "no_grid";
+    const degrees = (value: number) => this.t("unit.degrees", { value: this.num(value) });
     const angle =
       settings.angleMode === "random_angle"
         ? this.t("angle_mode.random_angle")
-        : `${this.t(`angle_mode.${settings.angleMode}`)}, ${this.t("unit.degrees", { value: settings.angle })}`;
-    const rows: (readonly [string, string | number] | false | undefined)[] = [
-      [this.t("step.areas"), this.selectedAreas.map((area) => area.name).join(" → ") || "–"],
+        : `${this.t(`angle_mode.${settings.angleMode}`)}, ${degrees(settings.angle)}`;
+    const rows: (readonly [string, string] | false | undefined)[] = [
+      [this.t("step.areas"), this.selectedAreas.map((area) => area.name).join(", ")],
       [this.t("settings.pattern"), this.t(`pattern.${settings.pattern}`)],
       striped && [this.t("settings.angle"), angle],
-      settings.pattern === "double_grid" && [
-        this.t("settings.cross_angle"),
-        this.t("unit.degrees", { value: settings.crossAngle }),
-      ],
-      [this.t("settings.spacing"), this.t("unit.cm", { value: settings.spacingCm })],
-      [this.t("settings.perimeter_laps"), settings.perimeterLaps],
-      [this.t("settings.obstacle_laps"), settings.obstacleLaps],
+      settings.pattern === "double_grid" && [this.t("settings.cross_angle"), degrees(settings.crossAngle)],
+      [this.t("settings.spacing"), this.t("unit.cm", { value: this.num(settings.spacingCm) })],
+      [this.t("settings.perimeter_laps"), this.num(settings.perimeterLaps)],
+      [this.t("settings.obstacle_laps"), this.num(settings.obstacleLaps)],
       striped && [this.t("settings.mow_order"), this.t(`mow_order.${settings.mowOrder}`)],
-      [this.t("settings.speed"), this.t("unit.speed", { value: settings.speed })],
+      [this.t("settings.speed"), this.t("unit.speed", { value: this.num(settings.speed, 1) })],
       settings.bladeHeight !== undefined && [
         this.t("settings.blade_height"),
-        this.t("unit.mm", { value: settings.bladeHeight }),
+        this.t("unit.mm", { value: this.num(settings.bladeHeight) }),
+      ],
+      settings.edgeDistance !== undefined && [
+        this.t("settings.edge"),
+        this.t(settings.edgeDistance < 0.25 ? "edge.inside" : "edge.on"),
       ],
       this.pathLengthM > 0 && [
         this.t("review.distance"),
-        this.t("summary.distance", { km: (this.pathLengthM / 1000).toFixed(1) }),
+        this.t("summary.distance", { km: this.num(this.pathLengthM / 1000, 1) }),
       ],
       this.duration !== undefined && [this.t("review.estimate"), this.duration],
     ];
@@ -514,7 +646,8 @@ export class MowPlannerCard extends LitElement {
       this.config?.exact_route &&
       this.map.status === "ready" &&
       !this.blocker &&
-      !ACTIVE_STATES.includes(mower.state);
+      !ACTIVE_STATES.includes(mower.state) &&
+      this.request.status === "idle";
     return html`
       <dl>
         ${rows.map((row) =>
@@ -529,74 +662,105 @@ export class MowPlannerCard extends LitElement {
       ${
         canFetchRoute
           ? html`<button
-                class="text-button"
-                ?disabled=${this.route.status === "loading"}
-                @click=${() => void this.loadRoute()}
-              >
-                ${this.t(this.route.status === "loading" ? "preview.exact_route_loading" : "preview.exact_route")}
-              </button>
-              ${
-                this.route.status === "unavailable"
-                  ? html`<p class="secondary" role="status">${this.t("preview.exact_route_unavailable")}</p>`
-                  : nothing
-              }`
+              class="text-button"
+              ?disabled=${this.busy}
+              @click=${() => {
+                this.askToConfirm(true);
+              }}
+            >
+              ${this.t(this.route.status === "loading" ? "preview.exact_route_loading" : "preview.exact_route")}
+            </button>`
           : nothing
       }
-      ${ACTIVE_STATES.includes(mower.state) ? this.renderAlert("warning", "warn.active_job", mower) : nothing}
+      ${
+        this.route.status === "unavailable"
+          ? html`<p class="secondary" role="status">${this.t("preview.exact_route_unavailable")}</p>`
+          : nothing
+      }
     `;
   }
 
   private renderAlert(kind: "warning" | "error" | "success", key: StringKey, mower: Mower): TemplateResult {
     return html`
-      <p class="alert ${kind}" role=${kind === "success" ? "status" : "alert"}>
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          ${mdiIcon(kind === "success" ? mdiCheckCircleOutline : mdiAlertOutline)}
-        </svg>
+      <p class="alert ${kind}" role=${kind === "error" ? "alert" : "status"}>
+        ${this.renderIcon(kind === "success" ? mdiCheckCircleOutline : mdiAlertOutline)}
         ${this.t(key, { name: mower.name })}
       </p>
     `;
   }
 
-  private renderFooter(mower: Mower): TemplateResult {
-    const { blocker, step, start } = this;
-    const index = STEPS.indexOf(step);
-    const next = STEPS[index + 1];
-    const back = STEPS[index - 1];
-    if (step === "review" && start === "confirming") {
-      return html`
-        <footer class="confirm" role="alertdialog" aria-label=${this.t("action.start")}>
-          <p>${this.t("start.confirm", { name: mower.name, areas: this.totals.join(" · ") })}</p>
-          <div class="actions">
-            <button
-              class="text-button"
-              @click=${() => {
-                this.start = "idle";
-              }}
-            >
-              ${this.t("action.cancel")}
-            </button>
-            <button class="primary" ?disabled=${!this.confirmArmed} @click=${() => void this.sendStart()}>
-              ${this.t("action.confirm_start")}
-            </button>
-          </div>
-        </footer>
-      `;
-    }
+  private renderConfirm({ plan, armed }: Extract<Request, { status: "confirming" }>): TemplateResult {
+    const { mower, planOnly } = plan;
     return html`
-      <footer>
-        ${step === "review" && start === "sent" ? this.renderAlert("success", "start.sent", mower) : nothing}
-        ${step === "review" && start === "failed" ? this.renderAlert("error", "start.failed", mower) : nothing}
+      <footer
+        class="confirm"
+        role="alertdialog"
+        aria-label=${this.t(planOnly ? "preview.exact_route" : "action.start")}
+        @keydown=${(event: KeyboardEvent) => {
+          if (event.key === "Escape") this.cancelConfirm();
+        }}
+      >
+        <p>
+          ${
+            planOnly
+              ? this.t("route.confirm", { name: mower.name })
+              : this.t("start.confirm", { name: mower.name, areas: plan.summary })
+          }
+        </p>
         ${
-          blocker && (step === "review" || blocker === "warn.no_area")
-            ? this.renderAlert("error", blocker, mower)
+          !planOnly && ACTIVE_STATES.includes(mower.state)
+            ? this.renderAlert("warning", "warn.active_job", mower)
             : nothing
         }
         <div class="actions">
-          <span class="secondary totals" aria-live="polite">${this.totals.join(" · ")}</span>
+          <button
+            class="text-button"
+            data-focus
+            @click=${() => {
+              this.cancelConfirm();
+            }}
+          >
+            ${this.t("action.cancel")}
+          </button>
+          <button class="primary" ?disabled=${!armed} @click=${() => void this.sendConfirmed()}>
+            ${this.t(planOnly ? "action.confirm_route" : "action.confirm_start")}
+          </button>
+        </div>
+      </footer>
+    `;
+  }
+
+  private renderFooter(mower: Mower): TemplateResult {
+    const { blocker, step, request } = this;
+    if (request.status === "confirming") return this.renderConfirm(request);
+    const outcome =
+      step === "review" && request.status !== "idle" && request.plan.mower.entityId === mower.entityId;
+    const next = STEPS[STEPS.indexOf(step) + 1];
+    const back = STEPS[STEPS.indexOf(step) - 1];
+    const blocked = blocker && (step !== "areas" || blocker === "warn.unavailable");
+    return html`
+      <footer>
+        ${outcome && request.status === "sent" ? this.renderAlert("success", "start.sent", mower) : nothing}
+        ${outcome && request.status === "failed" ? this.renderAlert("error", "start.failed", mower) : nothing}
+        ${blocked ? this.renderAlert("error", blocker, mower) : nothing}
+        ${
+          step === "review" && !blocker && request.status === "idle" && ACTIVE_STATES.includes(mower.state)
+            ? this.renderAlert("warning", "warn.active_job", mower)
+            : nothing
+        }
+        <div class="actions">
+          <span class="secondary totals" aria-live="polite">
+            ${
+              step === "areas" && blocker === "warn.no_area"
+                ? this.t("warn.no_area")
+                : this.totals.map((phrase, index) => html`${index ? " · " : nothing}<bdi>${phrase}</bdi>`)
+            }
+          </span>
           ${
             back
               ? html`<button
                   class="text-button"
+                  ?disabled=${this.busy}
                   @click=${() => {
                     this.goTo(back);
                   }}
@@ -609,21 +773,35 @@ export class MowPlannerCard extends LitElement {
             next
               ? html`<button
                   class="primary"
-                  ?disabled=${blocker === "warn.no_area"}
+                  data-focus
+                  ?disabled=${blocker === (step === "areas" ? "warn.no_area" : "warn.no_path")}
                   @click=${() => {
                     this.goTo(next);
                   }}
                 >
                   ${this.t("action.next")}
                 </button>`
-              : html`<button
-                  class="primary"
-                  ?disabled=${Boolean(blocker) || start === "sending"}
-                  @click=${() => void this.askToStart()}
-                >
-                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(mdiPlay)}</svg>
-                  ${this.t(start === "sending" ? "action.starting" : "action.start")}
-                </button>`
+              : outcome && request.status === "sent"
+                ? html`<button
+                    class="primary"
+                    data-focus
+                    @click=${() => {
+                      this.startOver();
+                    }}
+                  >
+                    ${this.t("action.new_plan")}
+                  </button>`
+                : html`<button
+                    class="primary"
+                    data-focus
+                    ?disabled=${Boolean(blocker) || this.busy}
+                    @click=${() => {
+                      this.askToConfirm(false);
+                    }}
+                  >
+                    ${this.renderIcon(mdiPlay)}
+                    ${this.t(request.status === "sending" ? "action.starting" : "action.start")}
+                  </button>`
           }
         </div>
       </footer>
@@ -643,7 +821,7 @@ export class MowPlannerCard extends LitElement {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 12px 8px 8px 16px;
+        padding-block: 12px 8px;
         padding-inline: 16px 8px;
       }
       .title {
@@ -700,32 +878,29 @@ export class MowPlannerCard extends LitElement {
           var(--card-background-color, #fff)
         );
       }
-      mmp-map {
+      mow-planner-map {
         height: 100%;
       }
-      .message {
+      .map.vacant {
+        position: static;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        height: auto;
+        min-height: 120px;
+        padding: 16px;
+        color: var(--secondary-text-color, #727272);
+      }
+      .message,
+      .vacant p {
         margin: 0;
-        padding: 32px 16px;
         text-align: center;
         color: var(--secondary-text-color, #727272);
       }
-      .map .message {
-        position: absolute;
-        inset: 0;
-        display: grid;
-        place-items: center;
-      }
-      .note {
-        position: absolute;
-        inset-inline-start: 8px;
-        top: 8px;
-        max-width: calc(100% - 80px);
-        margin: 0;
-        padding: 4px 8px;
-        width: fit-content;
-        border-radius: var(--ha-border-radius-md, 8px);
-        background: color-mix(in srgb, var(--card-background-color, #fff) 85%, transparent);
-        pointer-events: none;
+      .message {
+        padding: 32px 16px;
       }
       .plan {
         display: flex;
@@ -754,7 +929,7 @@ export class MowPlannerCard extends LitElement {
         color: var(--secondary-text-color, #727272);
         font-weight: var(--ha-font-weight-medium, 500);
       }
-      .step:hover {
+      .step:hover:not(:disabled) {
         background: var(--mmp-surface);
       }
       .step[aria-current="step"] {
@@ -834,6 +1009,7 @@ export class MowPlannerCard extends LitElement {
       }
       .actions {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: flex-end;
         gap: 8px;
@@ -841,14 +1017,6 @@ export class MowPlannerCard extends LitElement {
       .totals {
         flex: 1 1 100%;
         min-width: 0;
-      }
-      .actions {
-        flex-wrap: wrap;
-      }
-      @container (min-width: 440px) {
-        .totals {
-          flex-basis: 0;
-        }
       }
       .primary,
       .text-button {
@@ -880,7 +1048,6 @@ export class MowPlannerCard extends LitElement {
         display: flex;
         align-items: center;
         gap: 8px;
-        margin: 8px 0 0;
         padding: 8px 12px;
         border-radius: var(--ha-border-radius-md, 8px);
         --alert-color: var(--error-color, #db4437);
@@ -895,42 +1062,42 @@ export class MowPlannerCard extends LitElement {
       .alert.success {
         --alert-color: var(--success-color, #43a047);
       }
+      @container (min-width: 440px) {
+        .totals {
+          flex-basis: 0;
+        }
+      }
       @container (min-width: 720px) {
         .layout {
           display: grid;
           grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr);
+          align-items: start;
         }
         .map {
-          position: relative;
-          top: 0;
-          height: auto;
-          min-height: 420px;
+          height: 460px;
           border-end-start-radius: var(--ha-card-border-radius, 12px);
+        }
+        .map.vacant {
+          height: 460px;
         }
       }
     `,
   ];
 }
 
-const STATE_KEYS = {
-  "state.mowing": true,
-  "state.paused": true,
-  "state.returning": true,
-  "state.docked": true,
-  "state.idle": true,
-  "state.error": true,
-};
-
-if (!customElements.get(CARD_TYPE)) customElements.define(CARD_TYPE, MowPlannerCard);
+defineOnce(CARD_TYPE, MowPlannerCard);
 
 declare global {
   interface Window {
-    customCards?: { type: string; name: string; description: string; preview?: boolean }[];
+    customCards?: { type: string; name: string; description: string }[];
   }
 }
 
-(window.customCards ??= []).push({
-  type: CARD_TYPE,
-  name: "Mammotion Mow Planner",
-  description: "Pick areas on the map, preview the mowing pattern and start the job.",
-});
+window.customCards ??= [];
+if (!window.customCards.some((card) => card.type === CARD_TYPE)) {
+  window.customCards.push({
+    type: CARD_TYPE,
+    name: "Mammotion Mow Planner",
+    description: "Pick areas on the map, preview the mowing pattern and start the job.",
+  });
+}

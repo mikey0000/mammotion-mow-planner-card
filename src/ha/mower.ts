@@ -7,7 +7,7 @@ import {
   type Range,
   type SettingLimits,
 } from "../model";
-import type { HassEntity, HomeAssistant } from "./types";
+import type { EntityRegistryDisplayEntry, HassEntity, HomeAssistant } from "./types";
 
 export interface AreaSwitch {
   readonly entityId: string;
@@ -26,9 +26,13 @@ export interface Mower {
   readonly position?: { readonly lon: number; readonly lat: number; readonly headingDeg?: number };
   readonly battery?: number;
   readonly limits: SettingLimits;
-  /** The values currently held by the integration's planning entities. */
+  /** The values currently held by the integration's planning entities, with fallbacks where one is missing. */
   readonly settings: MowSettings;
+  /** The settings that came from an entity rather than a fallback. */
+  readonly heldSettings: readonly SettingName[];
 }
+
+export type SettingName = keyof MowSettings;
 
 const LAPS = ["none", "one", "two", "three", "four"] as const;
 
@@ -66,6 +70,9 @@ function foldAngle(angle: number): number {
   return half > 90 ? half - 180 : half;
 }
 
+/** Folds a crossing angle into [0, 180); the two passes cross the same way either side. */
+const foldCrossAngle = (angle: number): number => ((angle % 180) + 180) % 180;
+
 function stateNumber(entity?: HassEntity): number | undefined {
   return entity && entity.state.trim() !== "" ? finite(Number(entity.state)) : undefined;
 }
@@ -76,15 +83,34 @@ function deviceName(hass: HomeAssistant, entityId: string): string | undefined {
   return device?.name_by_user ?? device?.name ?? undefined;
 }
 
-function displayName(hass: HomeAssistant, entityId: string): string {
+/** What the user calls the mower: its device name, else the entity's. */
+export function mowerName(hass: HomeAssistant, entityId: string): string {
   return deviceName(hass, entityId) ?? friendlyName(hass.states[entityId]) ?? entityId;
+}
+
+type Registry = HomeAssistant["entities"];
+
+/** `hass` is replaced on every state change but the registry object only on registry changes. */
+const entriesByDevice = new WeakMap<Registry, Map<string, EntityRegistryDisplayEntry[]>>();
+
+function deviceEntries(registry: Registry, deviceId: string): readonly EntityRegistryDisplayEntry[] {
+  let devices = entriesByDevice.get(registry);
+  if (!devices) {
+    devices = new Map();
+    for (const entry of Object.values(registry)) {
+      if (entry.device_id === undefined) continue;
+      devices.set(entry.device_id, [...(devices.get(entry.device_id) ?? []), entry]);
+    }
+    entriesByDevice.set(registry, devices);
+  }
+  return devices.get(deviceId) ?? [];
 }
 
 function siblings(hass: HomeAssistant, entityId: string): Sibling[] {
   const deviceId = hass.entities[entityId]?.device_id;
   if (deviceId === undefined) return [];
-  return Object.values(hass.entities).flatMap((entry) => {
-    const state = entry.device_id === deviceId ? hass.states[entry.entity_id] : undefined;
+  return deviceEntries(hass.entities, deviceId).flatMap((entry) => {
+    const state = hass.states[entry.entity_id];
     return state ? [{ key: entry.translation_key, state }] : [];
   });
 }
@@ -133,28 +159,47 @@ function readSettings(
   select: (key: string) => HassEntity | undefined,
   number: typeof select,
   limits: SettingLimits,
-): MowSettings {
-  const laps = (key: string, max: number): number => {
-    const option = selected(select(key), LAPS);
-    return Math.min(option === undefined ? 1 : LAPS.indexOf(option), max);
+): Pick<Mower, "settings" | "heldSettings"> {
+  const held: Partial<MowSettings> = {};
+  const hold = <K extends SettingName>(name: K, value: MowSettings[K] | undefined): void => {
+    if (value !== undefined) held[name] = value;
   };
-  const value = (key: string, fallback: number, limit: Range): number =>
-    clamp(stateNumber(number(key)) ?? fallback, limit);
+  const laps = (key: string, max: number): number | undefined => {
+    const option = selected(select(key), LAPS);
+    return option === undefined ? undefined : Math.min(LAPS.indexOf(option), max);
+  };
+  const value = (key: string, limit: Range | undefined, fold = (n: number) => n): number | undefined => {
+    const held = stateNumber(number(key));
+    return held === undefined || !limit ? undefined : clamp(fold(held), limit);
+  };
+  hold("pattern", selected(select("channel_mode"), limits.patterns));
+  hold("angleMode", selected(select("cutting_angle_mode"), limits.angleModes));
+  hold("angle", value("cutting_angle", limits.angle, foldAngle));
+  hold("crossAngle", value("toward_included_angle", limits.crossAngle, foldCrossAngle));
+  hold("spacingCm", value("path_spacing", limits.spacingCm));
+  hold("perimeterLaps", laps("mowing_laps", limits.maxPerimeterLaps));
+  hold("obstacleLaps", laps("obstacle_laps", limits.maxObstacleLaps));
+  hold("mowOrder", selected(select("border_mode"), MOW_ORDERS));
+  hold("speed", value("working_speed", limits.speed));
+  hold("bladeHeight", value("blade_height", limits.bladeHeight));
+  hold("edgeDistance", value("ride_boundary_distance", limits.edgeDistance));
   const { bladeHeight, edgeDistance } = limits;
   return {
-    pattern: selected(select("channel_mode"), limits.patterns) ?? "single_grid",
-    angleMode: selected(select("cutting_angle_mode"), limits.angleModes) ?? "relative_angle",
-    angle: clamp(foldAngle(stateNumber(number("cutting_angle")) ?? 0), limits.angle),
-    crossAngle: value("toward_included_angle", 90, limits.crossAngle),
-    spacingCm: value("path_spacing", 25, limits.spacingCm),
-    perimeterLaps: laps("mowing_laps", limits.maxPerimeterLaps),
-    obstacleLaps: laps("obstacle_laps", limits.maxObstacleLaps),
-    mowOrder: selected(select("border_mode"), MOW_ORDERS) ?? "border_first",
-    speed: value("working_speed", 0.3, limits.speed),
-    ...(bladeHeight && { bladeHeight: value("blade_height", midpoint(bladeHeight), bladeHeight) }),
-    ...(edgeDistance && {
-      edgeDistance: value("ride_boundary_distance", midpoint(edgeDistance), edgeDistance),
-    }),
+    settings: {
+      pattern: "single_grid",
+      angleMode: "relative_angle",
+      angle: 0,
+      crossAngle: 90,
+      spacingCm: clamp(25, limits.spacingCm),
+      perimeterLaps: Math.min(1, limits.maxPerimeterLaps),
+      obstacleLaps: Math.min(1, limits.maxObstacleLaps),
+      mowOrder: "border_first",
+      speed: clamp(0.3, limits.speed),
+      ...(bladeHeight && { bladeHeight: midpoint(bladeHeight) }),
+      ...(edgeDistance && { edgeDistance: midpoint(edgeDistance) }),
+      ...held,
+    },
+    heldSettings: Object.keys(held) as SettingName[],
   };
 }
 
@@ -191,7 +236,7 @@ export function findMowers(hass: HomeAssistant): string[] {
       (e) => e.platform === "mammotion" && e.entity_id.startsWith("lawn_mower.") && hass.states[e.entity_id],
     )
     .map((e) => e.entity_id)
-    .sort((a, b) => displayName(hass, a).localeCompare(displayName(hass, b)));
+    .sort((a, b) => mowerName(hass, a).localeCompare(mowerName(hass, b)));
 }
 
 export function readMower(hass: HomeAssistant, entityId: string): Mower | undefined {
@@ -211,37 +256,49 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
   );
   return {
     entityId,
-    name: displayName(hass, entityId),
+    name: mowerName(hass, entityId),
     state: mower.state,
     areas: readAreas(entities, deviceName(hass, entityId)),
     ...(position && { position }),
     ...(battery !== undefined && { battery }),
     limits,
-    settings: readSettings(select, number, limits),
+    ...readSettings(select, number, limits),
   };
 }
 
-/** `mammotion.start_mow` service data for a new job over `areaEntityIds`, in mowing order. */
+const SERVICE_FIELDS: { readonly [K in SettingName]: (value: NonNullable<MowSettings[K]>) => object } = {
+  pattern: (value) => ({ channel_mode: OPTIONS.channel_mode.indexOf(value) }),
+  angleMode: (value) => ({ toward_mode: OPTIONS.cutting_angle_mode.indexOf(value) }),
+  angle: (value) => ({ toward: Math.round(value) }),
+  crossAngle: (value) => ({ toward_included_angle: Math.round(value) }),
+  spacingCm: (value) => ({ channel_width: Math.round(value) }),
+  perimeterLaps: (value) => ({ mowing_laps: value }),
+  obstacleLaps: (value) => ({ obstacle_laps: value }),
+  mowOrder: (value) => ({ border_mode: OPTIONS.border_mode.indexOf(value) }),
+  speed: (value) => ({ speed: Math.round(value * 10) / 10 }),
+  bladeHeight: (value) => ({ blade_height: Math.round(value) }),
+  edgeDistance: (value) => ({ ride_boundary_distance: value }),
+};
+
+/**
+ * `mammotion.start_mow` service data for a new job over `areaEntityIds`, in mowing order.
+ * Only `names` are sent; the integration keeps its own value for every setting left out.
+ */
 export function startMowData(
   settings: MowSettings,
+  names: readonly SettingName[],
   areaEntityIds: readonly string[],
   planOnly = false,
 ): Record<string, unknown> {
-  return {
-    areas: [...areaEntityIds],
-    channel_mode: OPTIONS.channel_mode.indexOf(settings.pattern),
-    toward_mode: OPTIONS.cutting_angle_mode.indexOf(settings.angleMode),
-    toward: Math.round(settings.angle),
-    toward_included_angle: Math.round(settings.crossAngle),
-    channel_width: Math.round(settings.spacingCm),
-    mowing_laps: settings.perimeterLaps,
-    obstacle_laps: settings.obstacleLaps,
-    border_mode: OPTIONS.border_mode.indexOf(settings.mowOrder),
-    speed: Math.round(settings.speed * 10) / 10,
-    ...(settings.bladeHeight !== undefined && { blade_height: Math.round(settings.bladeHeight) }),
-    ...(settings.edgeDistance !== undefined && { ride_boundary_distance: settings.edgeDistance }),
-    ...(planOnly && { plan_only: true }),
+  const field = <K extends SettingName>(name: K): object => {
+    const value = settings[name];
+    return value === undefined ? {} : SERVICE_FIELDS[name](value);
   };
+  return Object.assign(
+    { areas: [...areaEntityIds] },
+    ...names.map(field),
+    planOnly ? { plan_only: true } : {},
+  ) as Record<string, unknown>;
 }
 
 async function fetchFeatures(

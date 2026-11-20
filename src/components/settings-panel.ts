@@ -1,6 +1,7 @@
+import { defineOnce } from "../define";
 import { mdiAngleAcute, mdiAutoFix, mdiChevronDown, mdiShuffleVariant } from "@mdi/js";
 import { css, html, LitElement, nothing, svg } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { property } from "lit/decorators.js";
 import { localize, type StringKey } from "../localize";
 import {
   ANGLE_MODES,
@@ -36,7 +37,6 @@ const dialTicks = svg`<g class="ticks">${[0, 90, 180, 270].map(
 )}</g>`;
 
 /** Mowing settings form; fully controlled: fires `settings-changed` with a new settings object per change. */
-@customElement("mmp-settings")
 export class MowSettingsPanel extends LitElement {
   @property({ attribute: false }) settings!: MowSettings;
   @property({ attribute: false }) limits!: SettingLimits;
@@ -64,7 +64,7 @@ export class MowSettingsPanel extends LitElement {
         align-items: center;
         gap: var(--ha-space-3, 12px);
       }
-      .angle mmp-slider {
+      .angle mow-planner-slider {
         flex: 1;
         min-width: 0;
       }
@@ -111,7 +111,7 @@ export class MowSettingsPanel extends LitElement {
         transform: rotate(180deg);
       }
       details > .field,
-      details > mmp-slider {
+      details > mow-planner-slider {
         margin-block-start: var(--ha-space-3, 12px);
       }
     `,
@@ -262,7 +262,7 @@ export class MowSettingsPanel extends LitElement {
     extra: unknown[] = [],
   ) {
     return html`<div class="field">
-      <mmp-segmented
+      <mow-planner-segmented
         .label=${this.t(label)}
         .options=${options}
         .value=${value}
@@ -270,7 +270,7 @@ export class MowSettingsPanel extends LitElement {
         @value-changed=${(event: CustomEvent<{ value: T }>) => {
           this.emit(apply(event.detail.value));
         }}
-      ></mmp-segmented>
+      ></mow-planner-segmented>
       ${extra}
     </div>`;
   }
@@ -283,7 +283,7 @@ export class MowSettingsPanel extends LitElement {
     apply: (value: number) => Partial<MowSettings>,
     origin?: number,
   ) {
-    return html`<mmp-slider
+    return html`<mow-planner-slider
       .label=${this.t(label)}
       .range=${range}
       .value=${value}
@@ -294,7 +294,7 @@ export class MowSettingsPanel extends LitElement {
       @value-changed=${(event: CustomEvent<{ value: number }>) => {
         this.emit(apply(event.detail.value));
       }}
-    ></mmp-slider>`;
+    ></mow-planner-slider>`;
   }
 
   private laps(max: number): SegmentOption<number>[] {
@@ -332,8 +332,10 @@ export class MowSettingsPanel extends LitElement {
   }
 }
 
+defineOnce("mow-planner-settings", MowSettingsPanel);
+
 declare global {
   interface HTMLElementTagNameMap {
-    "mmp-settings": MowSettingsPanel;
+    "mow-planner-settings": MowSettingsPanel;
   }
 }

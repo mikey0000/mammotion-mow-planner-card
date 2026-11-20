@@ -6,11 +6,11 @@ A Home Assistant dashboard card for the [Mammotion integration](https://github.c
 - **Pattern.** Change the path angle, pattern, path spacing, perimeter laps and no-go zone laps, and watch the stripes redraw on the map as you drag.
 - **Review.** Check the summary, the path length and the estimated time, then start the job.
 
-The card reads the map and your current settings from the integration. It only sends something to the mower when you confirm **Start now**. Changing a setting in the card does not change the integration's entities; the values travel with the start command.
+The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card does not change the integration's entities; the values travel with the start command.
 
 ## Requirements
 
-- Home Assistant 2024.8 or newer.
+- Home Assistant 2024.11 or newer.
 - The Mammotion integration, with at least one mower that has a map.
 
 ## Install
@@ -48,7 +48,7 @@ The card works best at half a dashboard width or more. On a wide card the map si
 
 The preview is computed in the browser from the map and your settings. It is a faithful sketch, not the mower's own plan.
 
-- **Path spacing** is drawn to scale. When passes would be too close together to tell apart on screen, the map draws every n-th pass; zoom in to see them all.
+- **Path spacing** is drawn to scale. When passes would be too close together to tell apart on screen, the map draws every n-th pass and says so; zoom in to see them all.
 - **Perimeter laps** are rings inside the boundary, one path spacing apart. **No-go zone laps** are rings around each no-go zone.
 - **Grid** adds a second pass at the crossing angle. **Adaptive** is drawn as plain stripes, because the mower splits the area into zones itself. **Perimeter** has no stripes.
 - The estimated time is path length divided by speed. It ignores turns, travel between areas and charging, so expect the real job to take longer.
@@ -63,10 +63,11 @@ The mower measures custom angles in its own map frame, which can be rotated from
 
 ## Limits
 
-- The preview cannot show the route the mower will actually take. `exact_route: true` adds a button that asks the mower to plan the job without starting and then fetches that route. It depends on integration behaviour that is not reliable yet, so it may report that the mower shared no route.
-- Obstacle detection mode, start progress and the Yuka collection settings are not in the card. The job uses the values of the integration's own entities for those.
+- The preview cannot show the route the mower will actually take. `exact_route: true` adds a button that, after you confirm, asks the mower to plan the job without starting and then fetches that route. Planning drops a paused job on the mower. It depends on integration behaviour that is not reliable yet, so it may report that the mower shared no route, or show the route of an earlier job.
+- Obstacle detection mode, start progress and the Yuka collection settings are not in the card. The job uses the values of the integration's own entities for those, and for any setting whose entity is missing or has no value.
 - Starting a job while the mower is mowing, paused or returning ends the current job first. The card warns you in the review step.
-- Loading the map makes the integration start a five-minute status stream from the mower. The card loads the map once per mower and when you press refresh.
+- Loading the map makes the integration start a five-minute status stream from the mower. The card loads the map once per mower and again when you press refresh.
+- On a touchscreen one finger scrolls the dashboard; use two fingers, or the buttons, to move and zoom the map.
 
 ## Development
 

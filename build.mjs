@@ -11,7 +11,7 @@ const card = {
   target: "es2022",
   minify: !watch,
   sourcemap: watch ? "inline" : false,
-  legalComments: "none",
+  legalComments: "eof",
   logLevel: "info",
 };
 const demo = {

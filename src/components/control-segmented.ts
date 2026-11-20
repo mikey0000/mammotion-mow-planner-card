@@ -1,5 +1,6 @@
+import { defineOnce } from "../define";
 import { css, html, LitElement, type SVGTemplateResult } from "lit";
-import { customElement, property } from "lit/decorators.js";
+import { property } from "lit/decorators.js";
 import { controlStyles } from "../styles";
 import { headStyles } from "./control-head";
 
@@ -14,7 +15,6 @@ export interface SegmentOption<T extends SegmentValue = SegmentValue> {
 const steps: Readonly<Record<string, number>> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
 
 /** Labelled single-choice control showing the selection as text; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
-@customElement("mmp-segmented")
 export class SegmentedControl extends LitElement {
   @property() label = "";
   @property({ attribute: false }) options: readonly SegmentOption[] = [];
@@ -50,7 +50,7 @@ export class SegmentedControl extends LitElement {
       }
       button[aria-checked="true"] {
         background: var(--mmp-tint);
-        color: var(--mmp-accent);
+        color: var(--primary-text-color, #212121);
       }
       button[aria-checked="true"]:disabled {
         background: var(--mmp-surface);
@@ -140,8 +140,10 @@ export class SegmentedControl extends LitElement {
   }
 }
 
+defineOnce("mow-planner-segmented", SegmentedControl);
+
 declare global {
   interface HTMLElementTagNameMap {
-    "mmp-segmented": SegmentedControl;
+    "mow-planner-segmented": SegmentedControl;
   }
 }
