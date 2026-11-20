@@ -496,13 +496,17 @@ export class MowMap extends LitElement {
           color-mix(in srgb, var(--mmp-area-color) 50%, var(--mmp-channel-color)) 16%,
           transparent
         );
-        stroke: color-mix(in srgb, var(--mmp-area-color) 40%, var(--mmp-channel-color));
+        stroke: color-mix(
+          in srgb,
+          color-mix(in srgb, var(--mmp-area-color) 40%, var(--mmp-channel-color)) 60%,
+          transparent
+        );
         stroke-width: 1;
         cursor: pointer;
         outline: none;
       }
       .viewport .area.selected {
-        fill: color-mix(in srgb, var(--mmp-area-color) 55%, transparent);
+        fill: color-mix(in srgb, var(--mmp-area-color) 70%, transparent);
         stroke: var(--mmp-selected-color);
         stroke-width: 3;
       }
@@ -516,7 +520,7 @@ export class MowMap extends LitElement {
       }
       .viewport .nogo {
         fill: color-mix(in srgb, var(--mmp-nogo-color) 35%, transparent);
-        stroke: var(--mmp-nogo-color);
+        stroke: color-mix(in srgb, var(--mmp-nogo-color) 60%, var(--mmp-halo-color));
         stroke-width: 1.5;
       }
       .viewport .stripes {
