@@ -4,6 +4,7 @@ import {
   fetchMap,
   fetchPlannedRoute,
   findMowers,
+  mowerName,
   readMower,
   startMow,
   startMowData,
@@ -42,6 +43,20 @@ const FALLBACK_LIMITS = {
   maxObstacleLaps: 4,
   speed: { min: 0.2, max: 0.6, step: 0.1 },
 };
+
+const ALL_HELD = [
+  "pattern",
+  "angleMode",
+  "angle",
+  "crossAngle",
+  "spacingCm",
+  "perimeterLaps",
+  "obstacleLaps",
+  "mowOrder",
+  "speed",
+  "bladeHeight",
+  "edgeDistance",
+];
 
 const FALLBACK_SETTINGS = {
   pattern: "single_grid",
@@ -113,6 +128,7 @@ describe("readMower", () => {
         bladeHeight: 55,
         edgeDistance: 0.5,
       },
+      heldSettings: ALL_HELD,
     });
   });
 
@@ -171,6 +187,7 @@ describe("readMower", () => {
       areas: [],
       limits: FALLBACK_LIMITS,
       settings: FALLBACK_SETTINGS,
+      heldSettings: [],
     });
   });
 
@@ -179,6 +196,7 @@ describe("readMower", () => {
 
     expect(mower?.limits).toEqual(FALLBACK_LIMITS);
     expect(mower?.settings).toEqual(FALLBACK_SETTINGS);
+    expect(mower?.heldSettings).toEqual([]);
   });
 
   it("uses fallback values but live limits for unknown states", () => {
@@ -186,6 +204,20 @@ describe("readMower", () => {
 
     expect(mower?.limits.angleModes).toContain("random_angle");
     expect(mower?.settings).toEqual({ ...FALLBACK_SETTINGS, bladeHeight: 48, edgeDistance: 0.5 });
+    expect(mower?.heldSettings).toEqual([]);
+  });
+
+  it("holds only the settings whose entity has a value", () => {
+    const mower = readLuba({
+      "number.luba_blade_height": { state: "unknown" },
+      "select.luba_border_mode": { state: "unavailable" },
+      "number.luba_path_spacing": null,
+    });
+
+    expect(mower?.heldSettings).toEqual(
+      ALL_HELD.filter((name) => !["bladeHeight", "mowOrder", "spacingCm"].includes(name)),
+    );
+    expect(mower?.settings).toMatchObject({ bladeHeight: 48, mowOrder: "border_first", spacingCm: 25 });
   });
 
   it("reads Yuka-style limits and clamps the held spacing into them", () => {
@@ -224,7 +256,21 @@ describe("readMower", () => {
     });
 
     expect(mower?.limits.crossAngle).toEqual({ min: 1, max: 179, step: 1 });
-    expect(mower?.settings).toMatchObject({ crossAngle: 1, speed: 0.6, obstacleLaps: 1 });
+    expect(mower?.settings).toMatchObject({ crossAngle: 150, speed: 0.6, obstacleLaps: 1 });
+  });
+
+  it.each([
+    [-90, 90],
+    [-30, 150],
+    [270, 90],
+    [0, 1],
+    [180, 1],
+    [-180, 1],
+    [179, 179],
+  ])("folds a stored crossing angle of %d modulo 180 into %d", (stored, folded) => {
+    const mower = readLuba({ "number.luba_toward_included_angle": { state: String(stored) } });
+
+    expect(mower?.settings.crossAngle).toBe(folded);
   });
 
   it.each([
@@ -256,6 +302,56 @@ describe("readMower", () => {
   });
 });
 
+describe("mowerName", () => {
+  it("prefers the user's device name, then the device name, the friendly name and the entity id", () => {
+    const entities = [
+      { entity_id: "lawn_mower.a", state: "idle", device_id: "d1", attributes: { friendly_name: "A" } },
+      { entity_id: "lawn_mower.b", state: "idle", device_id: "d2", attributes: { friendly_name: "B" } },
+      { entity_id: "lawn_mower.c", state: "idle", attributes: { friendly_name: "C" } },
+      { entity_id: "lawn_mower.d", state: "idle" },
+    ];
+    const hass = makeHass(entities, [device("d1", "Luba", "Garden bot"), device("d2", "Yuka")]);
+
+    expect(["a", "b", "c", "d", "missing"].map((id) => mowerName(hass, `lawn_mower.${id}`))).toEqual([
+      "Garden bot",
+      "Yuka",
+      "C",
+      "lawn_mower.d",
+      "lawn_mower.missing",
+    ]);
+  });
+});
+
+describe("readMower across hass updates", () => {
+  it("reads fresh states from a new hass that shares the entity registry", () => {
+    const hass = makeHass(lubaEntities(), [LUBA]);
+    expect(readMower(hass, "lawn_mower.luba")?.settings.spacingCm).toBe(28);
+    const spacing = hass.states["number.luba_path_spacing"];
+    if (!spacing) throw new Error("no spacing entity");
+
+    const next = {
+      ...hass,
+      states: { ...hass.states, "number.luba_path_spacing": { ...spacing, state: "31" } },
+    };
+
+    expect(next.entities).toBe(hass.entities);
+    expect(readMower(next, "lawn_mower.luba")?.settings.spacingCm).toBe(31);
+  });
+
+  it("picks up entities added in a new entity registry", () => {
+    const hass = makeHass(withChanges(lubaEntities(), { "switch.luba_back_lawn": null }), [LUBA]);
+    expect(readMower(hass, "lawn_mower.luba")?.areas.map((a) => a.hash)).toEqual([111]);
+
+    const added = makeHass(lubaEntities(), [LUBA]);
+
+    expect(
+      readMower({ ...hass, states: added.states, entities: added.entities }, "lawn_mower.luba")?.areas.map(
+        (a) => a.hash,
+      ),
+    ).toEqual([111, 222]);
+  });
+});
+
 describe("startMowData", () => {
   const settings: MowSettings = {
     pattern: "single_grid",
@@ -269,9 +365,34 @@ describe("startMowData", () => {
     speed: 0.30000000000000004,
   };
   const areas = ["switch.luba_area_front", "switch.luba_back_lawn"];
+  const all = [
+    "pattern",
+    "angleMode",
+    "angle",
+    "crossAngle",
+    "spacingCm",
+    "perimeterLaps",
+    "obstacleLaps",
+    "mowOrder",
+    "speed",
+    "bladeHeight",
+    "edgeDistance",
+  ] as const;
 
-  it("builds the base payload without optional fields", () => {
-    expect(startMowData(settings, areas)).toEqual({
+  it("sends only the areas when no setting is named", () => {
+    expect(startMowData(settings, [], areas)).toEqual({ areas });
+  });
+
+  it("sends only the named settings", () => {
+    expect(startMowData({ ...settings, bladeHeight: 48 }, ["spacingCm", "speed"], areas)).toEqual({
+      areas,
+      channel_width: 25,
+      speed: 0.3,
+    });
+  });
+
+  it("encodes every named setting", () => {
+    expect(startMowData(settings, all, areas)).toEqual({
       areas,
       channel_mode: 0,
       toward_mode: 0,
@@ -291,7 +412,7 @@ describe("startMowData", () => {
     ["segment_grid", 2],
     ["no_grid", 3],
   ] as const)("encodes pattern %s as %d", (pattern, code) => {
-    expect(startMowData({ ...settings, pattern }, areas).channel_mode).toBe(code);
+    expect(startMowData({ ...settings, pattern }, ["pattern"], areas).channel_mode).toBe(code);
   });
 
   it.each([
@@ -299,12 +420,13 @@ describe("startMowData", () => {
     ["absolute_angle", 1],
     ["random_angle", 2],
   ] as const)("encodes angle mode %s as %d", (angleMode, code) => {
-    expect(startMowData({ ...settings, angleMode }, areas).toward_mode).toBe(code);
+    expect(startMowData({ ...settings, angleMode }, ["angleMode"], areas).toward_mode).toBe(code);
   });
 
-  it("includes blade height, edge distance and plan_only when given", () => {
+  it("rounds blade height and spacing, and adds plan_only when asked", () => {
     const data = startMowData(
       { ...settings, mowOrder: "grid_first", bladeHeight: 55.4, edgeDistance: 0.5, spacingCm: 12.6 },
+      all,
       areas,
       true,
     );
@@ -318,26 +440,18 @@ describe("startMowData", () => {
     });
   });
 
-  it("never sends fields the card does not edit", () => {
-    const keys = Object.keys(startMowData({ ...settings, bladeHeight: 40, edgeDistance: 0 }, areas, true));
+  it("leaves out a named optional setting the mower does not have", () => {
+    const data = startMowData(settings, ["bladeHeight", "edgeDistance"], areas);
 
-    expect(keys.sort()).toEqual(
-      [
-        "areas",
-        "blade_height",
-        "border_mode",
-        "channel_mode",
-        "channel_width",
-        "mowing_laps",
-        "obstacle_laps",
-        "plan_only",
-        "ride_boundary_distance",
-        "speed",
-        "toward",
-        "toward_included_angle",
-        "toward_mode",
-      ].sort(),
-    );
+    expect(data).toEqual({ areas });
+  });
+
+  it("copies the area list in mowing order", () => {
+    const order = ["switch.b", "switch.a"];
+    const data = startMowData(settings, [], order);
+    order.push("switch.c");
+
+    expect(data.areas).toEqual(["switch.b", "switch.a"]);
   });
 });
 

@@ -1,5 +1,6 @@
 import { EndType, FillRule, JoinType, areaD, differenceD, inflatePathsD, type PathsD } from "clipper2-ts";
 import { boundsOf } from "./bounds";
+import { toPath } from "./shared";
 import type { Point, Ring } from "../model";
 
 const PRECISION = 2;
@@ -38,8 +39,4 @@ function centroid(ring: Ring): Point {
   if (Math.abs(area) > 1e-9) return { x: cx / (3 * area), y: cy / (3 * area) };
   const n = ring.length || 1;
   return { x: ring.reduce((s, p) => s + p.x, 0) / n, y: ring.reduce((s, p) => s + p.y, 0) / n };
-}
-
-function toPath(ring: Ring): PathsD[number] {
-  return ring.map(({ x, y }) => ({ x, y }));
 }

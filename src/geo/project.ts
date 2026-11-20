@@ -2,11 +2,11 @@ import { areaD } from "clipper2-ts";
 import type { Feature, FeatureCollection } from "geojson";
 import type { MapModel, Marker, Point, Zone } from "../model";
 import { boundsOf } from "./bounds";
+import { RAD, toPath } from "./shared";
 
 type LonLat = readonly [number, number];
 
 const EARTH_RADIUS_M = 6_371_008.8;
-const RAD = Math.PI / 180;
 
 /** Builds the local-metre map from the integration's `get_geojson` response; undefined when it has no areas. */
 export function projectMap(geojson: FeatureCollection): MapModel | undefined {
@@ -28,8 +28,7 @@ export function projectMap(geojson: FeatureCollection): MapModel | undefined {
       hash: typeof hash === "number" ? hash : 0,
       name: String(Name ?? title ?? ""),
       outline,
-      areaM2:
-        typeof area === "number" && area > 0 ? area : Math.abs(areaD(outline.map(({ x, y }) => ({ x, y })))),
+      areaM2: typeof area === "number" && area > 0 ? area : Math.abs(areaD(toPath(outline))),
     };
   };
 

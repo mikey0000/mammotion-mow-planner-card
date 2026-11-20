@@ -50,7 +50,7 @@ export function normalizeConfig(config: unknown): CardConfig {
   return {
     type: typeof type === "string" ? type : `custom:${CARD_TYPE}`,
     ...(mowers && { entities: mowers }),
-    ...(title !== undefined && { title }),
+    ...(title && { title }),
     ...(angle_offset !== undefined && { angle_offset }),
     ...(exact_route !== undefined && { exact_route }),
   };

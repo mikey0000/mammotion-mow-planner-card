@@ -350,4 +350,21 @@ describe("previewArea edge cases", () => {
     expect(performance.now() - started).toBeLessThan(500);
     expect(preview.stripes.length).toBeGreaterThan(500);
   });
+
+  it("still lays every stripe of a long, narrow 2 ha area at 5 cm", () => {
+    const preview = previewArea(
+      rect(0, 0, 1000, 20),
+      [],
+      settings({ angle: 90, spacingCm: 5, perimeterLaps: 0 }),
+    );
+    expect(preview.stripes).toHaveLength(19_999);
+  });
+
+  it("gives up on stripes rather than hanging when the spacing is absurdly small", () => {
+    const started = performance.now();
+    const preview = previewArea(field, [], settings({ spacingCm: 0.001 }));
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(preview.stripes).toEqual([]);
+    expect(preview.perimeterLaps).toHaveLength(1);
+  });
 });

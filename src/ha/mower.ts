@@ -290,9 +290,9 @@ export function startMowData(
   areaEntityIds: readonly string[],
   planOnly = false,
 ): Record<string, unknown> {
-  const field = <K extends SettingName>(name: K): object => {
+  const field = (name: SettingName): object => {
     const value = settings[name];
-    return value === undefined ? {} : SERVICE_FIELDS[name](value);
+    return value === undefined ? {} : (SERVICE_FIELDS[name] as (value: unknown) => object)(value);
   };
   return Object.assign(
     { areas: [...areaEntityIds] },

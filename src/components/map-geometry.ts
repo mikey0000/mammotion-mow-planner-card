@@ -32,15 +32,40 @@ export const toScreen = (view: View, { x, y }: Point): Point => ({
   y: view.scale * (view.y - y),
 });
 
-export function fitView(bounds: Bounds, width: number, height: number, margin = 0.06): View {
+/** How far overlays reach into the map from its edges, in px. */
+export interface Insets {
+  readonly left: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+/** The view that shows `bounds` whole in a `width` x `height` px map, clear of `insets`. */
+export function fitView(
+  bounds: Bounds,
+  width: number,
+  height: number,
+  { left, right, bottom }: Insets,
+  margin = 0.06,
+): View {
+  const free = { width: Math.max(width - left - right, 1), height: Math.max(height - bottom, 1) };
   const w = Math.max(bounds.maxX - bounds.minX, 1) * (1 + 2 * margin);
   const h = Math.max(bounds.maxY - bounds.minY, 1) * (1 + 2 * margin);
-  const scale = Math.min(width / w, height / h);
+  const scale = Math.min(free.width / w, free.height / h);
   return {
     scale,
-    x: width / (2 * scale) - (bounds.minX + bounds.maxX) / 2,
-    y: height / (2 * scale) + (bounds.minY + bounds.maxY) / 2,
+    x: (left + free.width / 2) / scale - (bounds.minX + bounds.maxX) / 2,
+    y: free.height / (2 * scale) + (bounds.minY + bounds.maxY) / 2,
   };
+}
+
+/** `point`, pushed straight away from `from` until it is at least `distance` from it. */
+export function clearOf(point: Point, from: Point, distance: number): Point {
+  const [dx, dy] = [point.x - from.x, point.y - from.y];
+  const gap = Math.hypot(dx, dy);
+  if (gap >= distance) return point;
+  return gap
+    ? { x: from.x + (dx / gap) * distance, y: from.y + (dy / gap) * distance }
+    : { x: point.x, y: from.y + distance };
 }
 
 export const mapKey = ({ origin, bounds }: MapModel) => JSON.stringify([origin, bounds]);

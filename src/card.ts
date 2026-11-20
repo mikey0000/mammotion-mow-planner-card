@@ -66,6 +66,15 @@ const ROUTE_POLLS = 10;
 /** Keeps a double tap on Start from also confirming it. */
 const CONFIRM_ARM_MS = 600;
 
+/** The switches name unnamed areas differently from the map; the switches are what the user knows. */
+function withSwitchNames(model: MapModel, switches: readonly AreaSwitch[]): MapModel {
+  const names = new Map(switches.map((area) => [area.hash, area.name]));
+  return {
+    ...model,
+    areas: model.areas.map((zone) => ({ ...zone, name: names.get(zone.hash) ?? zone.name })),
+  };
+}
+
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class MowPlannerCard extends LitElement {
@@ -79,7 +88,7 @@ export class MowPlannerCard extends LitElement {
   @state() private language?: string;
   @state() private step: Step = "areas";
   @state() private pickedHashes?: readonly number[];
-  @state() private editedSettings?: MowSettings;
+  @state() private edits: Partial<MowSettings> = {};
   @state() private map: MapState = { status: "loading" };
   @state() private previews: readonly AreaPreview[] = [];
   @state() private route: RouteState = IDLE;
@@ -126,7 +135,7 @@ export class MowPlannerCard extends LitElement {
     const offered = this.config?.entities ?? findMowers(hass);
     if (offered.join() !== this.mowerIds.join()) this.mowerIds = offered;
     const known = this.mowerId && (offered.includes(this.mowerId) || this.mowerId in hass.entities);
-    if (!known) this.mowerId = offered[0];
+    if (!known) this.mowerId = offered.find((id) => id in hass.states) ?? offered[0];
     const mower = this.mowerId ? readMower(hass, this.mowerId) : undefined;
     const snapshot = JSON.stringify(mower);
     if (snapshot !== this.mowerSnapshot) {
@@ -136,12 +145,13 @@ export class MowPlannerCard extends LitElement {
   }
 
   private pickMower(mowerId: string): void {
+    if (this.busy) return;
     this.mowerId = mowerId;
     this.syncMower();
   }
 
   private get settings(): MowSettings | undefined {
-    return this.editedSettings ?? this.mower?.settings;
+    return this.mower && { ...this.mower.settings, ...this.edits };
   }
 
   private get selectedAreas(): readonly AreaSwitch[] {
@@ -152,6 +162,15 @@ export class MowPlannerCard extends LitElement {
 
   private get busy(): boolean {
     return this.request.status === "sending" || this.route.status === "loading";
+  }
+
+  private get active(): boolean {
+    return ACTIVE_STATES.includes(this.mower?.state ?? "");
+  }
+
+  /** Planning a route drops a paused job, so a busy mower is never asked for one. */
+  private refuses(planOnly: boolean): boolean {
+    return Boolean(this.blocker) || (planOnly && this.active);
   }
 
   private get pathLengthM(): number {
@@ -179,7 +198,8 @@ export class MowPlannerCard extends LitElement {
     this.hadFocus = this.matches(":focus-within");
     if (changed.has("mowerId")) this.resetPlan();
     this.refreshPreviews();
-    if (this.request.status === "confirming" && this.blocker) this.cancelConfirm();
+    if (this.request.status === "confirming" && this.refuses(this.request.plan.planOnly))
+      this.cancelConfirm();
   }
 
   protected override updated(changed: PropertyValues): void {
@@ -194,7 +214,7 @@ export class MowPlannerCard extends LitElement {
   private resetPlan(): void {
     this.step = "areas";
     this.pickedHashes = undefined;
-    this.editedSettings = undefined;
+    this.edits = {};
     this.forgetOutcome();
   }
 
@@ -224,7 +244,8 @@ export class MowPlannerCard extends LitElement {
 
   private async loadMap(refresh = false): Promise<void> {
     const { mowerId, latestHass: hass } = this;
-    if (!mowerId || !hass) return;
+    const areas = this.mower?.areas;
+    if (!mowerId || !hass || !areas) return;
     const loaded = refresh ? undefined : this.loadedMaps.get(mowerId);
     if (loaded) {
       this.map = loaded;
@@ -236,21 +257,12 @@ export class MowPlannerCard extends LitElement {
     try {
       const geojson = await fetchMap(hass, mowerId);
       const model = geojson && projectMap(geojson);
-      map = model ? { status: "ready", model: this.withSwitchNames(model) } : { status: "empty" };
+      map = model ? { status: "ready", model: withSwitchNames(model, areas) } : { status: "empty" };
     } catch {
       map = { status: "error" };
     }
     if (map.status === "ready") this.loadedMaps.set(mowerId, map);
     if (load === this.latestMapLoad) this.map = map;
-  }
-
-  /** The switches name unnamed areas differently from the map; the switches are what the user knows. */
-  private withSwitchNames(model: MapModel): MapModel {
-    const names = new Map(this.mower?.areas.map((area) => [area.hash, area.name]));
-    return {
-      ...model,
-      areas: model.areas.map((zone) => ({ ...zone, name: names.get(zone.hash) ?? zone.name })),
-    };
   }
 
   private toggleArea(hash: number): void {
@@ -261,6 +273,7 @@ export class MowPlannerCard extends LitElement {
   }
 
   private toggleAll(): void {
+    if (this.busy) return;
     const all = (this.mower?.areas ?? []).map((area) => area.hash);
     const picked = this.selectedAreas.map((area) => area.hash);
     this.pickedHashes =
@@ -268,8 +281,12 @@ export class MowPlannerCard extends LitElement {
     this.forgetOutcome();
   }
 
+  /** Records only the fields that changed, so the rest keep following the mower. */
   private editSettings(settings: MowSettings): void {
-    this.editedSettings = settings;
+    const shown = this.settings;
+    if (this.busy || !shown) return;
+    const changed = Object.entries(settings).filter(([name, value]) => value !== shown[name as SettingName]);
+    this.edits = { ...this.edits, ...Object.fromEntries(changed) };
     this.forgetOutcome();
   }
 
@@ -286,18 +303,12 @@ export class MowPlannerCard extends LitElement {
 
   /** The settings to send: those an entity holds, plus those changed in the card. */
   private get sentSettings(): SettingName[] {
-    const { mower, settings } = this;
-    if (!mower || !settings) return [];
-    const edited = (Object.keys(settings) as SettingName[]).filter(
-      (name) => settings[name] !== mower.settings[name],
-    );
-    return [...new Set([...mower.heldSettings, ...edited])];
+    return [...new Set([...(this.mower?.heldSettings ?? []), ...(Object.keys(this.edits) as SettingName[])])];
   }
 
   private askToConfirm(planOnly: boolean): void {
     const { mower, settings } = this;
-    if (!mower || !settings || this.blocker || this.busy) return;
-    if (planOnly && ACTIVE_STATES.includes(mower.state)) return;
+    if (!mower || !settings || this.busy || this.refuses(planOnly)) return;
     const areas = this.selectedAreas.map((area) => area.entityId);
     const plan: Plan = {
       mower,
@@ -319,8 +330,9 @@ export class MowPlannerCard extends LitElement {
 
   private async sendConfirmed(): Promise<void> {
     const { latestHass: hass, request } = this;
-    if (!hass || request.status !== "confirming" || !request.armed || this.blocker) return;
+    if (!hass || request.status !== "confirming" || !request.armed) return;
     const { plan } = request;
+    if (this.refuses(plan.planOnly)) return;
     this.request = { status: "sending", plan };
     let sent = true;
     try {
@@ -328,9 +340,10 @@ export class MowPlannerCard extends LitElement {
     } catch {
       sent = false;
     }
-    if (sent && plan.planOnly) {
+    if (plan.planOnly) {
       this.request = IDLE;
-      await this.loadRoute(hass, plan.mower.entityId);
+      if (sent) await this.loadRoute(hass, plan.mower.entityId);
+      else this.route = { status: "unavailable" };
     } else {
       this.request = { status: sent ? "sent" : "failed", plan };
     }
@@ -419,7 +432,14 @@ export class MowPlannerCard extends LitElement {
 
   protected override render(): TemplateResult {
     const { mower } = this;
-    if (!mower) return html`<ha-card><p class="message" role="status">${this.t("mower.none")}</p></ha-card>`;
+    if (!mower) {
+      return html`
+        <ha-card>
+          ${this.mowerIds.length > 1 ? html`<header>${this.renderMowerPicker()}</header>` : nothing}
+          <p class="message" role="status">${this.t("mower.none")}</p>
+        </ha-card>
+      `;
+    }
     return html`
       <ha-card>
         ${this.renderHeader(mower)}
@@ -441,7 +461,7 @@ export class MowPlannerCard extends LitElement {
 
   private renderHeader(mower: Mower): TemplateResult {
     const known = KNOWN_STATES.find((name) => name === mower.state);
-    const title = this.config?.title || (this.mowerIds.length < 2 ? mower.name : undefined);
+    const title = this.config?.title ?? (this.mowerIds.length < 2 ? mower.name : undefined);
     return html`
       <header>
         <div class="title">
@@ -707,11 +727,7 @@ export class MowPlannerCard extends LitElement {
               : this.t("start.confirm", { name: mower.name, areas: plan.summary })
           }
         </p>
-        ${
-          !planOnly && ACTIVE_STATES.includes(mower.state)
-            ? this.renderAlert("warning", "warn.active_job", mower)
-            : nothing
-        }
+        ${!planOnly && this.active ? this.renderAlert("warning", "warn.active_job", mower) : nothing}
         <div class="actions">
           <button
             class="text-button"
@@ -744,7 +760,7 @@ export class MowPlannerCard extends LitElement {
         ${outcome && request.status === "failed" ? this.renderAlert("error", "start.failed", mower) : nothing}
         ${blocked ? this.renderAlert("error", blocker, mower) : nothing}
         ${
-          step === "review" && !blocker && request.status === "idle" && ACTIVE_STATES.includes(mower.state)
+          step === "review" && !blocker && request.status === "idle" && this.active
             ? this.renderAlert("warning", "warn.active_job", mower)
             : nothing
         }
@@ -774,7 +790,7 @@ export class MowPlannerCard extends LitElement {
               ? html`<button
                   class="primary"
                   data-focus
-                  ?disabled=${blocker === (step === "areas" ? "warn.no_area" : "warn.no_path")}
+                  ?disabled=${step === "areas" ? this.selectedAreas.length === 0 : blocker === "warn.no_path"}
                   @click=${() => {
                     this.goTo(next);
                   }}

@@ -3,10 +3,12 @@ import Panzoom, { type PanzoomEventDetail, type PanzoomObject } from "@panzoom/p
 import { mdiFitToScreenOutline, mdiFlash, mdiMinus, mdiPlus } from "@mdi/js";
 import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
 import { property, query, state } from "lit/decorators.js";
+import { ref } from "lit/directives/ref.js";
 import type { AreaPreview, MapModel, Marker, Point, Zone } from "../model";
 import { controlStyles } from "../styles";
 import { labelPosition } from "../geo/label";
 import {
+  clearOf,
   fitView,
   mapKey,
   polylinePath,
@@ -15,6 +17,7 @@ import {
   ringWidth,
   stripeStep,
   toScreen,
+  type Insets,
   type PreviewShape,
   type View,
 } from "./map-geometry";
@@ -29,19 +32,9 @@ export interface MapStrings {
   readonly noGoZone: string;
   /** Accessible name of an area; `order` is its 1-based mowing position when selected. */
   readonly area: (area: { name: string; areaM2: number; order?: number }) => string;
+  /** Shown while pass lines are too dense on screen and only every `n`-th one is drawn. */
+  readonly everyNthPass: (n: number) => string;
 }
-
-export const DEFAULT_MAP_STRINGS: MapStrings = {
-  mapLabel: "Map",
-  zoomIn: "Zoom in",
-  zoomOut: "Zoom out",
-  fit: "Fit map",
-  dock: "Dock",
-  mower: "Mower",
-  noGoZone: "No-go zone",
-  area: ({ name, areaM2, order }) =>
-    `${name}, ${Math.round(areaM2)} m²${order ? `, selected, position ${order}` : ""}`,
-};
 
 interface AreaShape {
   readonly zone: Zone;
@@ -50,10 +43,18 @@ interface AreaShape {
   readonly widthM: number;
 }
 
+interface ClientPoint {
+  readonly clientX: number;
+  readonly clientY: number;
+}
+
 const TAP_SLOP_PX = 6;
 const ZOOM_STEP = 0.3;
+const WHEEL_ZOOM_PER_PX = 0.002;
+const WHEEL_LINE_PX = 33;
 const PAN_STEP_PX = 48;
 const MIN_LABEL_WIDTH_PX = 48;
+const MOWER_CLEARANCE_PX = 24;
 const PAN_KEYS: Partial<Record<string, readonly [number, number]>> = {
   ArrowLeft: [PAN_STEP_PX, 0],
   ArrowRight: [-PAN_STEP_PX, 0],
@@ -67,12 +68,16 @@ export class MowMap extends LitElement {
   @property({ attribute: false }) previews: readonly AreaPreview[] = [];
   @property({ attribute: false }) mower?: Marker;
   @property({ attribute: false }) route?: readonly (readonly Point[])[];
-  @property({ attribute: false }) strings: MapStrings = DEFAULT_MAP_STRINGS;
+  /** Nothing is rendered until these are set. */
+  @property({ attribute: false }) strings?: MapStrings;
+  /** An extra line for the map caption. */
+  @property({ attribute: false }) note?: string;
   @property({ type: Boolean, reflect: true }) readonly = false;
 
   @state() private view: View = { x: 0, y: 0, scale: 1 };
-  @query("svg") private readonly svgElement?: SVGSVGElement;
   @query(".viewport") private readonly viewport?: SVGGElement;
+  @query(".controls") private readonly controls?: HTMLElement;
+  @query(".caption") private readonly caption?: HTMLElement;
 
   private areaShapes: readonly AreaShape[] = [];
   private previewShapes: readonly PreviewShape[] = [];
@@ -82,6 +87,9 @@ export class MowMap extends LitElement {
   private userAdjustedView = false;
   private gestureStart: Point = { x: 0, y: 0 };
   private dragged = false;
+  private readonly touches = new Map<number, PointerEvent>();
+  private pinch?: { readonly centre: ClientPoint; readonly distance: number };
+  private observedCaption?: Element;
   private readonly resizeObserver = new ResizeObserver(() => {
     if (!this.userAdjustedView) this.fit();
   });
@@ -89,12 +97,19 @@ export class MowMap extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.resizeObserver.observe(this);
+    document.addEventListener("pointermove", this.onPointerMove);
+    document.addEventListener("pointerup", this.onPointerEnd);
+    document.addEventListener("pointercancel", this.onPointerEnd);
     if (this.hasUpdated) this.attachPanzoom();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.resizeObserver.disconnect();
+    document.removeEventListener("pointermove", this.onPointerMove);
+    document.removeEventListener("pointerup", this.onPointerEnd);
+    document.removeEventListener("pointercancel", this.onPointerEnd);
+    this.touches.clear();
     this.panzoom?.instance.destroy();
     this.panzoom = undefined;
   }
@@ -125,16 +140,31 @@ export class MowMap extends LitElement {
   }
 
   protected override render() {
-    const model = this.model;
-    if (!model) return nothing;
+    const { model, strings } = this;
+    if (!model || !strings) return nothing;
     const order = new Map(this.selected.map((hash, i) => [hash, i + 1]));
+    const clipIndex = new Map(this.areaShapes.map(({ zone }, i) => [zone.hash, i]));
+    const previews = this.routePath
+      ? []
+      : this.previewShapes.flatMap((shape) => {
+          const clip = clipIndex.get(shape.hash);
+          return clip === undefined ? [] : [{ shape, clip }];
+        });
+    const thinning = Math.max(
+      1,
+      ...previews
+        .filter(({ shape }) => shape.stripes || shape.crossingStripes)
+        .map(({ shape }) => shape.step),
+    );
+    const notes = [thinning > 1 ? strings.everyNthPass(thinning) : "", this.note ?? ""].filter(Boolean);
+    const mower = this.mower && toScreen(this.view, this.mower.position);
     return html`
       <svg
         role="group"
-        aria-label=${this.strings.mapLabel}
+        aria-label=${strings.mapLabel}
         tabindex="0"
         @pointerdown=${this.onPointerDown}
-        @pointermove=${this.onPointerMove}
+        @touchmove=${this.twoFingerScrollBlocker}
         @wheel=${this.onWheel}
         @keydown=${this.onMapKey}
       >
@@ -143,28 +173,36 @@ export class MowMap extends LitElement {
             ${this.areaShapes.map(({ d }, i) => svg`<clipPath id="clip-${i}"><path d=${d} /></clipPath>`)}
           </defs>
           <path class="channels" d=${model.channels.map(polylinePath).join("")} />
-          ${this.areaShapes.map(({ zone, d }) => this.renderArea(zone, d, order.get(zone.hash)))}
+          ${this.areaShapes.map(({ zone, d }) => this.renderArea(strings, zone, d, order.get(zone.hash)))}
           ${model.obstacles.map(
             (zone) =>
-              svg`<path class="nogo" role="img" aria-label="${this.strings.noGoZone}: ${zone.name}" d=${ringPath(zone.outline)} />`,
+              svg`<path class="nogo" role="img" aria-label="${strings.noGoZone}: ${zone.name}" d=${ringPath(zone.outline)} />`,
           )}
-          ${this.routePath ? svg`<path class="route" d=${this.routePath} />` : this.renderPreviews()}
+          ${
+            this.routePath
+              ? svg`<path class="route" d=${this.routePath} />`
+              : previews.map(({ shape, clip }) => this.renderPreview(shape, clip))
+          }
         </g>
         <g class="overlay">
-          ${this.areaShapes.map((shape) => this.renderLabel(shape, order.get(shape.zone.hash)))}
-          ${model.dock && this.renderDock(model.dock)} ${this.mower && this.renderMower(this.mower)}
+          ${this.areaShapes.map((shape) => this.renderLabel(shape, order.get(shape.zone.hash), mower))}
+          ${model.dock && this.renderDock(strings, model.dock)}
+          ${this.mower && this.renderMower(strings, this.mower)}
         </g>
       </svg>
+      <div class="caption" role="note" ?hidden=${!notes.length} ${ref(this.observeCaption)}>
+        ${notes.map((line) => html`<div>${line}</div>`)}
+      </div>
       <div class="controls">
-        ${this.renderButton(this.strings.zoomIn, mdiPlus, this.zoomIn)}
-        ${this.renderButton(this.strings.zoomOut, mdiMinus, this.zoomOut)}
-        ${this.renderButton(this.strings.fit, mdiFitToScreenOutline, this.fit)}
+        ${this.renderButton(strings.zoomIn, mdiPlus, this.zoomIn)}
+        ${this.renderButton(strings.zoomOut, mdiMinus, this.zoomOut)}
+        ${this.renderButton(strings.fit, mdiFitToScreenOutline, this.fit)}
       </div>
     `;
   }
 
-  private renderArea(zone: Zone, d: string, order: number | undefined) {
-    const label = this.strings.area({ name: zone.name, areaM2: zone.areaM2, order });
+  private renderArea(strings: MapStrings, zone: Zone, d: string, order: number | undefined) {
+    const label = strings.area({ name: zone.name, areaM2: zone.areaM2, order });
     return this.readonly
       ? svg`<path class="area ${order ? "selected" : ""}" data-hash=${zone.hash} role="img" aria-label=${label} d=${d} />`
       : svg`<path
@@ -180,22 +218,17 @@ export class MowMap extends LitElement {
         />`;
   }
 
-  private renderPreviews() {
-    const clipIndex = new Map(this.areaShapes.map(({ zone }, i) => [zone.hash, i]));
-    return this.previewShapes.map((shape) => {
-      const index = clipIndex.get(shape.hash);
-      if (index === undefined) return nothing;
-      return svg`<g class="preview" clip-path="url(#clip-${index})">
-        <path class="stripes" d=${shape.stripes} />
-        ${shape.crossingStripes ? svg`<path class="stripes crossing" d=${shape.crossingStripes} />` : nothing}
-        <path class="laps" d=${shape.laps} />
-        <path class="obstacle-laps" d=${shape.obstacleLaps} />
-      </g>`;
-    });
+  private renderPreview(shape: PreviewShape, clip: number) {
+    return svg`<g class="preview" clip-path="url(#clip-${clip})">
+      <path class="stripes" d=${shape.stripes} />
+      ${shape.crossingStripes ? svg`<path class="stripes crossing" d=${shape.crossingStripes} />` : nothing}
+      <path class="laps" d=${`${shape.laps}${shape.obstacleLaps}`} />
+    </g>`;
   }
 
-  private renderLabel({ zone, label, widthM }: AreaShape, order: number | undefined) {
-    const { x, y } = toScreen(this.view, label);
+  private renderLabel({ zone, label, widthM }: AreaShape, order: number | undefined, mower?: Point) {
+    const at = toScreen(this.view, label);
+    const { x, y } = mower ? clearOf(at, mower, MOWER_CLEARANCE_PX) : at;
     const showName = widthM * this.view.scale >= MIN_LABEL_WIDTH_PX;
     const badgeY = showName ? -12 : 0;
     return svg`<g class="label" aria-hidden="true" transform="translate(${x} ${y})">
@@ -204,17 +237,17 @@ export class MowMap extends LitElement {
     </g>`;
   }
 
-  private renderDock({ position }: Marker) {
+  private renderDock(strings: MapStrings, { position }: Marker) {
     const { x, y } = toScreen(this.view, position);
-    return svg`<g class="dock" role="img" aria-label=${this.strings.dock} transform="translate(${x} ${y})">
+    return svg`<g class="dock" role="img" aria-label=${strings.dock} transform="translate(${x} ${y})">
       <rect x="-12" y="-12" width="24" height="24" rx="6" />
       <path d=${mdiFlash} transform="translate(-9 -9) scale(0.75)" />
     </g>`;
   }
 
-  private renderMower({ position, headingDeg }: Marker) {
+  private renderMower(strings: MapStrings, { position, headingDeg }: Marker) {
     const { x, y } = toScreen(this.view, position);
-    return svg`<g class="mower" role="img" aria-label=${this.strings.mower} transform="translate(${x} ${y}) rotate(${headingDeg ?? 0})">
+    return svg`<g class="mower" role="img" aria-label=${strings.mower} transform="translate(${x} ${y}) rotate(${headingDeg ?? 0})">
       <path d="M0 -13L10 11L0 6L-10 11Z" />
     </g>`;
   }
@@ -231,11 +264,12 @@ export class MowMap extends LitElement {
     this.panzoom?.instance.destroy();
     this.panzoom = target && {
       target,
-      // touch-action none: the map is a pan surface, so one-finger drags must not scroll the page.
+      // Unbound: a lone touch is left to scroll the page, so pointers are forwarded selectively.
       instance: Panzoom(target, {
+        noBind: true,
         canvas: true,
         cursor: "grab",
-        touchAction: "none",
+        touchAction: "pan-x pan-y",
         startX: this.view.x,
         startY: this.view.y,
         startScale: this.view.scale,
@@ -249,7 +283,7 @@ export class MowMap extends LitElement {
   private readonly fit = (): void => {
     const instance = this.panzoom?.instance;
     if (!instance || !this.model || !this.clientWidth || !this.clientHeight) return;
-    const view = fitView(this.model.bounds, this.clientWidth, this.clientHeight);
+    const view = fitView(this.model.bounds, this.clientWidth, this.clientHeight, this.covered());
     instance.setOptions({
       startX: view.x,
       startY: view.y,
@@ -270,14 +304,32 @@ export class MowMap extends LitElement {
     this.zoomBy(-ZOOM_STEP);
   };
 
+  /** How far the zoom buttons and the caption reach into the map. */
+  private covered(): Insets {
+    const host = this.getBoundingClientRect();
+    const controls = this.controls?.getBoundingClientRect();
+    const caption = this.caption?.hidden === false ? this.caption.getBoundingClientRect() : undefined;
+    const rtl = getComputedStyle(this).direction === "rtl";
+    return {
+      left: controls && rtl ? controls.right - host.left : 0,
+      right: controls && !rtl ? host.right - controls.left : 0,
+      bottom: caption ? host.bottom - caption.top : 0,
+    };
+  }
+
   private zoomBy(step: number): void {
-    const instance = this.panzoom?.instance;
-    const box = this.svgElement?.getBoundingClientRect();
-    if (!instance || !box) return;
-    instance.zoomToPoint(instance.getScale() * Math.exp(step), {
-      clientX: box.left + box.width / 2,
-      clientY: box.top + box.height / 2,
+    const host = this.getBoundingClientRect();
+    const { left, right, bottom } = this.covered();
+    this.zoomAt(Math.exp(step), {
+      clientX: host.left + (left + host.width - right) / 2,
+      clientY: host.top + (host.height - bottom) / 2,
     });
+  }
+
+  private zoomAt(factor: number, point: ClientPoint): void {
+    const instance = this.panzoom?.instance;
+    if (!instance) return;
+    instance.zoomToPoint(instance.getScale() * factor, point);
     this.userAdjustedView = true;
   }
 
@@ -293,21 +345,79 @@ export class MowMap extends LitElement {
   };
 
   private readonly onWheel = (event: WheelEvent) => {
-    this.panzoom?.instance.zoomWithWheel(event);
-    this.userAdjustedView = true;
+    event.preventDefault();
+    const px = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * WHEEL_LINE_PX : event.deltaY;
+    this.zoomAt(Math.exp(-px * WHEEL_ZOOM_PER_PX), event);
+  };
+
+  private readonly twoFingerScrollBlocker = {
+    passive: false,
+    handleEvent: (event: TouchEvent) => {
+      if (event.touches.length > 1) event.preventDefault();
+    },
   };
 
   private readonly onPointerDown = (event: PointerEvent) => {
     this.dragged = !event.isPrimary;
     if (event.isPrimary) this.gestureStart = { x: event.clientX, y: event.clientY };
+    if (event.pointerType !== "touch") {
+      this.panzoom?.instance.handleDown(event);
+      return;
+    }
+    this.touches.set(event.pointerId, event);
+    this.restartPinch();
   };
 
   // A tap jitters by a pixel or two; only a real drag or pinch counts as the user moving the view.
   private readonly onPointerMove = (event: PointerEvent) => {
+    if (event.pointerType !== "touch") this.panzoom?.instance.handleMove(event);
+    else if (this.touches.has(event.pointerId)) {
+      this.touches.set(event.pointerId, event);
+      this.followPinch();
+    }
     const { x, y } = this.gestureStart;
     if (Math.hypot(event.clientX - x, event.clientY - y) <= TAP_SLOP_PX) return;
     this.dragged = true;
-    if (event.buttons) this.userAdjustedView = true;
+    if (event.buttons && event.pointerType !== "touch") this.userAdjustedView = true;
+  };
+
+  private readonly onPointerEnd = (event: PointerEvent) => {
+    if (event.type === "pointercancel") this.dragged = true;
+    if (event.pointerType !== "touch") {
+      this.panzoom?.instance.handleUp(event);
+      return;
+    }
+    this.touches.delete(event.pointerId);
+    this.restartPinch();
+  };
+
+  private restartPinch(): void {
+    this.pinch = undefined;
+    this.followPinch();
+  }
+
+  /** Zooms by the change in distance between the first two touches and pans by the move of their midpoint. */
+  private followPinch(): void {
+    const [a, b] = this.touches.values();
+    const instance = this.panzoom?.instance;
+    if (!a || !b || !instance) return;
+    const centre = { clientX: (a.clientX + b.clientX) / 2, clientY: (a.clientY + b.clientY) / 2 };
+    const distance = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const from = this.pinch;
+    if (from?.distance) {
+      instance.zoomToPoint(instance.getScale() * (distance / from.distance), from.centre);
+      const scale = instance.getScale();
+      const [dx, dy] = [centre.clientX - from.centre.clientX, centre.clientY - from.centre.clientY];
+      instance.pan(dx / scale, dy / scale, { relative: true });
+      this.userAdjustedView = true;
+    }
+    this.pinch = { centre, distance };
+  }
+
+  private readonly observeCaption = (caption?: Element) => {
+    if (this.observedCaption) this.resizeObserver.unobserve(this.observedCaption);
+    this.observedCaption = caption;
+    if (caption) this.resizeObserver.observe(caption);
   };
 
   private readonly onMapKey = (event: KeyboardEvent) => {
@@ -339,7 +449,11 @@ export class MowMap extends LitElement {
     css`
       :host {
         --mmp-area-color: var(--success-color, #43a047);
-        --mmp-selected-color: var(--primary-color, #03a9f4);
+        --mmp-selected-color: color-mix(
+          in srgb,
+          var(--mmp-area-color) 60%,
+          var(--primary-text-color, #212121)
+        );
         --mmp-nogo-color: var(--warning-color, #ffa600);
         --mmp-channel-color: var(--secondary-text-color, #727272);
         --mmp-path-color: var(--primary-text-color, #212121);
@@ -373,15 +487,22 @@ export class MowMap extends LitElement {
         stroke-width: 1.5;
         stroke-dasharray: 4 4;
       }
+      .viewport :not(.area) {
+        pointer-events: none;
+      }
       .viewport .area {
-        fill: color-mix(in srgb, var(--mmp-area-color) 28%, transparent);
-        stroke: color-mix(in srgb, var(--mmp-area-color) 75%, transparent);
-        stroke-width: 1.5;
+        fill: color-mix(
+          in srgb,
+          color-mix(in srgb, var(--mmp-area-color) 50%, var(--mmp-channel-color)) 16%,
+          transparent
+        );
+        stroke: color-mix(in srgb, var(--mmp-area-color) 40%, var(--mmp-channel-color));
+        stroke-width: 1;
         cursor: pointer;
         outline: none;
       }
       .viewport .area.selected {
-        fill: color-mix(in srgb, var(--mmp-area-color) 50%, transparent);
+        fill: color-mix(in srgb, var(--mmp-area-color) 55%, transparent);
         stroke: var(--mmp-selected-color);
         stroke-width: 3;
       }
@@ -409,10 +530,6 @@ export class MowMap extends LitElement {
         stroke: color-mix(in srgb, var(--mmp-path-color) 75%, var(--mmp-area-color));
         stroke-width: 1.5;
       }
-      .viewport .obstacle-laps {
-        stroke: var(--mmp-nogo-color);
-        stroke-width: 1.25;
-      }
       .viewport .route {
         stroke: var(--mmp-route-color);
         stroke-width: 1.5;
@@ -435,7 +552,7 @@ export class MowMap extends LitElement {
         fill: var(--mmp-selected-color);
       }
       .overlay .badge {
-        fill: var(--text-primary-color, #fff);
+        fill: var(--mmp-halo-color);
         stroke: none;
       }
       .dock rect {
@@ -451,6 +568,20 @@ export class MowMap extends LitElement {
         stroke: var(--mmp-halo-color);
         stroke-width: 2;
         stroke-linejoin: round;
+      }
+      .caption {
+        position: absolute;
+        inset-block-end: var(--ha-space-2, 8px);
+        inset-inline-start: var(--ha-space-2, 8px);
+        max-inline-size: calc(100% - var(--mmp-control-height) - 4 * var(--ha-space-2, 8px));
+        box-sizing: border-box;
+        padding: var(--ha-space-1, 4px) var(--ha-space-2, 8px);
+        border-radius: var(--ha-border-radius-md, 8px);
+        background: color-mix(in srgb, var(--card-background-color, #fff) 85%, transparent);
+        color: var(--secondary-text-color, #727272);
+        font-size: var(--ha-font-size-s, 12px);
+        line-height: 16px;
+        pointer-events: none;
       }
       .controls {
         position: absolute;

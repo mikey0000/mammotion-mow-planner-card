@@ -14,11 +14,12 @@ import {
   type PathsD,
 } from "clipper2-ts";
 import { boundsOf } from "./bounds";
+import { RAD, toPath } from "./shared";
 import type { AreaPreview, MowSettings, Point, Ring, Stripe, Zone } from "../model";
 
 const PRECISION = 3;
 const ARC_TOLERANCE_M = 0.01;
-const RAD = Math.PI / 180;
+const MAX_LINES_PER_FAMILY = 20_000;
 
 /** The pattern the mower would cut over `area` with `settings`, avoiding `obstacles`. */
 export function previewArea(
@@ -97,6 +98,7 @@ function stripesAcross(region: PathsD, centre: Point, deg: number, pitch: number
   const local = region.flat().map((p) => ({ x: dot(p, centre, u), y: dot(p, centre, n) }));
   if (!local.length) return [];
   const { minX, minY, maxX, maxY } = boundsOf(local);
+  if ((maxY - minY) / pitch > MAX_LINES_PER_FAMILY) return [];
 
   const lines: PathsD = [];
   for (let i = Math.ceil(minY / pitch); i <= Math.floor(maxY / pitch); i++) {
@@ -174,10 +176,6 @@ function distance(a: Point, b: Point): number {
 
 function perimeterOf(ring: Ring): number {
   return ring.reduce((sum, p, i) => sum + distance(p, ring[(i + 1) % ring.length] ?? p), 0);
-}
-
-function toPath(ring: Ring): PathD {
-  return ring.map(({ x, y }) => ({ x, y }));
 }
 
 function toPoint({ x, y }: Point): Point {
