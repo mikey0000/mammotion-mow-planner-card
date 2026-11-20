@@ -109,6 +109,17 @@ const drag = (input: HTMLInputElement, value: string) => {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 };
 
+const rowValue = (el: Element, label: string) => {
+  const host = [...shadow(el).querySelectorAll("mmp-segmented")].find(
+    (s) => one(shadow(s), "[role=radiogroup]", Element).getAttribute("aria-label") === label,
+  );
+  if (!host) throw new Error(`no segmented "${label}"`);
+  return one(shadow(host), ".value", Element);
+};
+
+const fill = (input: HTMLInputElement) =>
+  ["--mmp-fill-from", "--mmp-fill-to"].map((name) => Number(input.style.getPropertyValue(name)));
+
 const groupLabels = (el: Element) => radiogroups(el).map((g) => g.getAttribute("aria-label"));
 
 afterEach(() => {
@@ -119,12 +130,58 @@ describe("<mmp-settings> rendering", () => {
   it("offers the patterns in app order with labels", async () => {
     const { el } = await mount();
     expect(radios(group(el, "Pattern")).map((r) => r.getAttribute("aria-label"))).toEqual([
-      "Zigzag",
-      "Checkerboard",
+      "Stripes",
+      "Grid",
       "Adaptive",
-      "Perimeter only",
+      "Perimeter",
     ]);
-    expect(radio(el, "Pattern", "Zigzag").getAttribute("aria-checked")).toBe("true");
+    expect(radio(el, "Pattern", "Stripes").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("spells out the selection of every choice row, hidden from screen readers", async () => {
+    const { el } = await mount();
+    expect(
+      ["Pattern", "Path angle", "Perimeter laps", "No-go zone laps", "Mow first", "Edge coverage"].map(
+        (label) => rowValue(el, label).textContent.trim(),
+      ),
+    ).toEqual(["Stripes", "Custom", "1", "1", "Perimeter", "On edge"]);
+    expect(rowValue(el, "Pattern").closest("[aria-hidden=true]")).not.toBeNull();
+  });
+
+  it("updates the row value when the selection changes", async () => {
+    const { el } = await mount();
+    el.settings = {
+      ...settings,
+      pattern: "double_grid",
+      angleMode: "relative_angle",
+      mowOrder: "grid_first",
+    };
+    await settle(el);
+    expect(rowValue(el, "Pattern").textContent.trim()).toBe("Grid");
+    expect(rowValue(el, "Path angle").textContent.trim()).toBe("Optimal");
+    expect(rowValue(el, "Mow first").textContent.trim()).toBe("Inside");
+  });
+
+  it("keeps a choice row reachable by keyboard when nothing in it is selected", async () => {
+    const { el } = await mount({ limits: { patterns: ["double_grid", "no_grid"] } });
+    expect(radios(group(el, "Pattern")).map((r) => r.tabIndex)).toEqual([0, -1]);
+  });
+
+  it("fills slider tracks from the minimum", async () => {
+    const { el } = await mount();
+    const [from, to] = fill(slider(el, "Path spacing").input);
+    expect(from).toBe(0);
+    expect(to).toBeCloseTo(1 / 3);
+  });
+
+  it("fills angle tracks from their centre", async () => {
+    const { el } = await mount({ settings: { pattern: "double_grid", angle: -45, crossAngle: 120 } });
+    const [angleFrom, angleTo] = fill(slider(el, "Angle").input);
+    expect(angleFrom).toBeCloseTo(0.25);
+    expect(angleTo).toBeCloseTo(0.5);
+    const [crossFrom, crossTo] = fill(slider(el, "Crossing angle").input);
+    expect(crossFrom).toBeCloseTo(89 / 178);
+    expect(crossTo).toBeCloseTo(119 / 178);
   });
 
   it("only offers the angle modes the mower supports", async () => {
@@ -215,11 +272,11 @@ describe("<mmp-settings> interaction", () => {
   };
 
   it.each([
-    ["Pattern", "Checkerboard", { pattern: "double_grid" }],
+    ["Pattern", "Grid", { pattern: "double_grid" }],
     ["Path angle", "Optimal", { angleMode: "relative_angle" }],
     ["Perimeter laps", "3", { perimeterLaps: 3 }],
     ["No-go zone laps", "0", { obstacleLaps: 0 }],
-    ["Mow first", "Stripes", { mowOrder: "grid_first" }],
+    ["Mow first", "Inside", { mowOrder: "grid_first" }],
     ["Edge coverage", "Inside edge", { edgeDistance: 0 }],
   ] as const)("%s → %s fires one change", async (groupLabel, label, change) => {
     const { el, events } = await mount();
@@ -229,7 +286,7 @@ describe("<mmp-settings> interaction", () => {
 
   it("does not fire when the selected segment is clicked again", async () => {
     const { el, events } = await mount();
-    radio(el, "Pattern", "Zigzag").click();
+    radio(el, "Pattern", "Stripes").click();
     expect(events).toEqual([]);
   });
 
@@ -279,9 +336,9 @@ describe("<mmp-settings> interaction", () => {
 
   it("moves the segmented selection with arrow keys", async () => {
     const { el, events } = await mount();
-    const zigzag = radio(el, "Pattern", "Zigzag");
-    zigzag.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
-    zigzag.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    const stripes = radio(el, "Pattern", "Stripes");
+    stripes.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    stripes.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
     expect(events.map((s) => s.pattern)).toEqual(["double_grid", "no_grid"]);
   });
 
@@ -292,7 +349,7 @@ describe("<mmp-settings> interaction", () => {
 
   it("blocks every control when disabled", async () => {
     const { el, events } = await mount({}, { disabled: true });
-    radio(el, "Pattern", "Checkerboard").click();
+    radio(el, "Pattern", "Grid").click();
     slider(el, "Speed").increase.click();
     drag(slider(el, "Angle").input, "10");
     expect(events).toEqual([]);
@@ -310,6 +367,19 @@ describe("<mmp-settings> interaction", () => {
     el.settings = { ...settings, angle: -45 };
     await settle(el);
     expect(transform()).toBe("rotate(45)");
+  });
+
+  it("marks the compass directions on the dial for a custom angle", async () => {
+    const { el } = await mount();
+    expect(shadow(el).querySelectorAll(".dial .ticks line")).toHaveLength(4);
+    expect(shadow(el).querySelector(".dial .baseline")).toBeNull();
+  });
+
+  it("draws the dial as an offset from the optimal direction in Optimal mode", async () => {
+    const { el } = await mount({ settings: { angleMode: "relative_angle", angle: 15 } });
+    expect(shadow(el).querySelector(".dial .ticks")).toBeNull();
+    expect(shadow(el).querySelector(".dial .baseline")).not.toBeNull();
+    expect(one(shadow(el), ".dial .stripes", Element).getAttribute("transform")).toBe("rotate(-15)");
   });
 
   it("fires a bubbling, composed event", async () => {

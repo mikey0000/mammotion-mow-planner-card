@@ -1,4 +1,4 @@
-import type { AreaPreview, Bounds, MapModel, Point, Ring } from "../model";
+import type { AreaPreview, Bounds, MapModel, Point, Ring, Stripe } from "../model";
 
 /** Panzoom transform: screen = scale * (svg point + pan). SVG points are metres with y flipped. */
 export interface View {
@@ -11,10 +11,13 @@ export interface PreviewShape {
   readonly hash: number;
   readonly laps: string;
   readonly obstacleLaps: string;
+  /** Only every `step`-th pass line is drawn. */
+  readonly step: number;
   readonly stripes: string;
-  /** Distance in metres between neighbouring parallel stripes. */
-  readonly pitch?: number;
+  readonly crossingStripes: string;
 }
+
+const MIN_STRIPE_PITCH_PX = 5;
 
 const round = (v: number) => Math.round(v * 100) / 100;
 const point = ({ x, y }: Point) => `${round(x)} ${round(-y)}`;
@@ -42,51 +45,28 @@ export function fitView(bounds: Bounds, width: number, height: number, margin = 
 
 export const mapKey = ({ origin, bounds }: MapModel) => JSON.stringify([origin, bounds]);
 
-/** Area centroid, falling back to the vertex mean for degenerate rings. */
-export function centroid(ring: Ring): Point {
-  let area = 0;
-  let cx = 0;
-  let cy = 0;
-  ring.forEach((a, i) => {
-    const b = ring[(i + 1) % ring.length] ?? a;
-    const cross = a.x * b.y - b.x * a.y;
-    area += cross;
-    cx += (a.x + b.x) * cross;
-    cy += (a.y + b.y) * cross;
-  });
-  if (Math.abs(area) > 1e-9) return { x: cx / (3 * area), y: cy / (3 * area) };
-  const n = ring.length || 1;
-  return { x: ring.reduce((s, p) => s + p.x, 0) / n, y: ring.reduce((s, p) => s + p.y, 0) / n };
-}
-
 export const ringWidth = (ring: Ring) => {
   const xs = ring.map((p) => p.x);
   return xs.length ? Math.max(...xs) - Math.min(...xs) : 0;
 };
 
-function stripePitch(stripes: AreaPreview["stripes"]): number | undefined {
-  const first = stripes[0];
-  if (!first) return undefined;
-  const [a, b] = first;
-  const length = Math.hypot(b.x - a.x, b.y - a.y);
-  if (!length) return undefined;
-  const ux = (b.x - a.x) / length;
-  const uy = (b.y - a.y) / length;
-  const offsets = stripes
-    .filter(
-      ([p, q]) => Math.abs((q.x - p.x) * uy - (q.y - p.y) * ux) < 0.01 * Math.hypot(q.x - p.x, q.y - p.y),
-    )
-    .map(([p]) => (p.x - a.x) * uy - (p.y - a.y) * ux)
-    .sort((m, n) => m - n);
-  const gaps = offsets.slice(1).map((o, i) => o - (offsets[i] ?? o));
-  const pitch = Math.min(...gaps.filter((g) => g > 0.01));
-  return Number.isFinite(pitch) ? pitch : undefined;
-}
+/** Smallest n such that drawing every n-th pass line keeps them a comfortable distance apart on screen. */
+export const stripeStep = (pitchM: number, scale: number) => {
+  const pitchPx = pitchM * scale;
+  return pitchPx > 0 ? Math.max(1, Math.ceil(MIN_STRIPE_PITCH_PX / pitchPx)) : 1;
+};
 
-export const previewShape = (preview: AreaPreview): PreviewShape => ({
-  hash: preview.hash,
-  laps: preview.perimeterLaps.map(ringPath).join(""),
-  obstacleLaps: preview.obstacleLaps.map(ringPath).join(""),
-  stripes: preview.stripes.map((segment) => polylinePath(segment)).join(""),
-  pitch: stripePitch(preview.stripes),
-});
+const stripePath = (stripes: readonly Stripe[]) =>
+  stripes.map(({ from, to }) => polylinePath([from, to])).join("");
+
+export function previewShape(preview: AreaPreview, step: number): PreviewShape {
+  const shown = preview.stripes.filter(({ line }) => line % step === 0);
+  return {
+    hash: preview.hash,
+    laps: preview.perimeterLaps.map(ringPath).join(""),
+    obstacleLaps: preview.obstacleLaps.map(ringPath).join(""),
+    step,
+    stripes: stripePath(shown.filter(({ pass }) => pass === 0)),
+    crossingStripes: stripePath(shown.filter(({ pass }) => pass === 1)),
+  };
+}

@@ -1,8 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MAP_STRINGS, MowMap } from "../../src/components/map-view";
-import type { AreaPreview, MapModel, Point, Ring } from "../../src/model";
+import type { AreaPreview, MapModel, Ring, Stripe } from "../../src/model";
 
-// Vitest resolves the package's UMD `main`, which has no ES default export; load the real ES build instead.
 const rect = (x0: number, y0: number, x1: number, y1: number): Ring => [
   { x: x0, y: y0 },
   { x: x1, y: y0 },
@@ -27,10 +26,10 @@ const model: MapModel = {
   dock: { position: { x: 0, y: -9 }, headingDeg: 90 },
 };
 
-const stripe = (y: number): readonly [Point, Point] => [
-  { x: 3, y },
-  { x: 19, y },
-];
+const stripe = (line: number, pitchM = 0.25, pass: 0 | 1 = 0): Stripe => {
+  const y = -9 + line * pitchM;
+  return { from: { x: 3, y }, to: { x: 19, y }, line, pass };
+};
 
 const preview: AreaPreview = {
   hash: 202,
@@ -38,14 +37,72 @@ const preview: AreaPreview = {
   directionExact: true,
   perimeterLaps: [rect(2.2, -9.8, 19.8, 9.8)],
   obstacleLaps: [],
-  stripes: [stripe(-9), stripe(-8.75), stripe(-8.5)],
+  stripes: [stripe(0, 1), stripe(1, 1), stripe(2, 1)],
+  pitchM: 1,
   lengthM: 48,
 };
 
+/** 0.25 m apart: 2.2 px at the 400 px wide fit, 22 px at the 4000 px wide one. */
+const densePreview: AreaPreview = {
+  ...preview,
+  stripes: Array.from({ length: 40 }, (_, line) => stripe(line)),
+  pitchM: 0.25,
+};
+
+class FakeResizeObserver implements ResizeObserver {
+  static readonly instances: FakeResizeObserver[] = [];
+  readonly targets = new Set<Element>();
+  constructor(private readonly callback: ResizeObserverCallback) {
+    FakeResizeObserver.instances.push(this);
+  }
+  observe(target: Element) {
+    this.targets.add(target);
+  }
+  unobserve(target: Element) {
+    this.targets.delete(target);
+  }
+  disconnect() {
+    this.targets.clear();
+  }
+  static notify(target: Element) {
+    for (const observer of this.instances.filter((o) => o.targets.has(target))) {
+      observer.callback([], observer);
+    }
+  }
+}
+
+beforeAll(() => {
+  vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+});
+
 const created: MowMap[] = [];
 
-async function renderMap(props: Partial<MowMap> = {}): Promise<MowMap> {
+// happy-dom has no layout, so the container size is given explicitly.
+const setSize = (map: MowMap, width: number, height: number) => {
+  Object.defineProperty(map, "clientWidth", { value: width, configurable: true });
+  Object.defineProperty(map, "clientHeight", { value: height, configurable: true });
+};
+
+async function settle(map: MowMap): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        setTimeout(resolve);
+      });
+    });
+    await map.updateComplete;
+  }
+}
+
+async function resize(map: MowMap, width: number, height: number): Promise<void> {
+  setSize(map, width, height);
+  FakeResizeObserver.notify(map);
+  await settle(map);
+}
+
+async function renderMap(props: Partial<MowMap> = {}, size?: readonly [number, number]): Promise<MowMap> {
   const map = Object.assign(new MowMap(), { model }, props);
+  if (size) setSize(map, ...size);
   created.push(map);
   document.body.append(map);
   await map.updateComplete;
@@ -72,8 +129,13 @@ function recordToggles(map: MowMap): number[] {
   return hashes;
 }
 
-const pointer = (type: string, clientX: number, clientY: number) =>
-  new PointerEvent(type, { bubbles: true, composed: true, clientX, clientY, isPrimary: true });
+const pointer = (type: string, clientX: number, clientY: number, buttons = 0) =>
+  new PointerEvent(type, { bubbles: true, composed: true, clientX, clientY, buttons, isPrimary: true });
+
+const translation = (el: Element | null): [number, number] => {
+  const [, x, y] = /translate\(([\d.e-]+) ([\d.e-]+)\)/.exec(el?.getAttribute("transform") ?? "") ?? [];
+  return [Number(x), Number(y)];
+};
 
 const countMoves = (d: string | null) => (d ?? "").match(/M/g)?.length ?? 0;
 
@@ -167,12 +229,41 @@ describe("mmp-map", () => {
   });
 
   it("draws previews as one path per layer with a segment per stripe", async () => {
-    const map = await renderMap({ previews: [preview] });
+    const map = await renderMap({ previews: [preview] }, [400, 300]);
+    await settle(map);
     const previews = root(map).querySelectorAll(".preview");
     expect(previews).toHaveLength(1);
     expect(countMoves(root(map).querySelector(".stripes")?.getAttribute("d") ?? null)).toBe(3);
     expect(countMoves(root(map).querySelector(".laps")?.getAttribute("d") ?? null)).toBe(1);
     expect(root(map).querySelector(".route")).toBeNull();
+  });
+
+  it("draws only every n-th pass line while lines are dense on screen, all of them once zoomed in", async () => {
+    const map = await renderMap({ previews: [densePreview] }, [400, 300]);
+    await settle(map);
+    const drawnLines = () => {
+      const d = root(map).querySelector(".stripes")?.getAttribute("d") ?? "";
+      return [...d.matchAll(/M[\d.-]+ ([\d.-]+)/g)].map(([, y]) => Math.round((Number(y) * -1 + 9) / 0.25));
+    };
+    expect(drawnLines()).toEqual(Array.from({ length: 14 }, (_, i) => 3 * i));
+    expect(root(map).querySelector(".stripes")?.getAttribute("opacity")).toBeNull();
+
+    await resize(map, 4000, 3000);
+    expect(drawnLines()).toEqual(Array.from({ length: 40 }, (_, i) => i));
+  });
+
+  it("draws the crossing pass as its own path", async () => {
+    const crossing = { ...preview, stripes: [stripe(0, 1), stripe(1, 1, 1), stripe(2, 1, 1)] };
+    const map = await renderMap({ previews: [crossing] }, [400, 300]);
+    await settle(map);
+    expect(countMoves(root(map).querySelector(".stripes:not(.crossing)")?.getAttribute("d") ?? null)).toBe(1);
+    expect(countMoves(root(map).querySelector(".stripes.crossing")?.getAttribute("d") ?? null)).toBe(2);
+    expect(countMoves(root(map).querySelector(".laps")?.getAttribute("d") ?? null)).toBe(1);
+  });
+
+  it("draws no crossing path for a single pass", async () => {
+    const map = await renderMap({ previews: [preview] }, [400, 300]);
+    expect(root(map).querySelector(".crossing")).toBeNull();
   });
 
   it("draws the exact route instead of previews", async () => {
@@ -226,6 +317,79 @@ describe("mmp-map", () => {
       .forEach((button) => {
         button.click();
       });
+  });
+
+  it("places area labels off the no-go zones in them", async () => {
+    const map = await renderMap({}, [400, 300]);
+    await settle(map);
+    const label = root(map).querySelector(".label");
+    const dock = root(map).querySelector(".dock");
+    const [lx, ly] = translation(label);
+    const [, dockY] = translation(dock);
+    const scale = (dockY - 150) / 9;
+    const pond = { x: 200 - 10 * scale, y: 150 };
+    expect(Math.hypot(lx - pond.x, ly - pond.y)).toBeGreaterThan(4 * scale);
+  });
+
+  it("separates the order badge from the area name", async () => {
+    const map = await renderMap({ selected: [101] }, [400, 300]);
+    await settle(map);
+    const label = root(map).querySelector(".label");
+    const nameY = Number(label?.querySelector(".name")?.getAttribute("y"));
+    const badgeY = Number(label?.querySelector(".badge-bg")?.getAttribute("cy"));
+    const badgeR = Number(label?.querySelector(".badge-bg")?.getAttribute("r"));
+    expect(nameY - badgeY - badgeR).toBeGreaterThanOrEqual(8);
+  });
+
+  it("draws the mower above the dock", async () => {
+    const map = await renderMap({ mower: { position: { x: 0, y: -9 } } });
+    const markers = [...root(map).querySelectorAll(".dock, .mower")].map((el) => el.getAttribute("class"));
+    expect(markers).toEqual(["dock", "mower"]);
+  });
+
+  it("fits the map centred in its container", async () => {
+    const map = await renderMap({}, [400, 300]);
+    await settle(map);
+    const [x, y] = translation(root(map).querySelector(".dock"));
+    expect(x).toBeCloseTo(200, 1);
+    expect(y).toBeCloseTo(150 + 9 * Math.min(400 / 44.8, 300 / 22.4), 1);
+  });
+
+  it("re-fits when the container is resized and the user has not moved the view", async () => {
+    const map = await renderMap({}, [400, 300]);
+    await settle(map);
+    await resize(map, 600, 700);
+    expect(translation(root(map).querySelector(".dock"))[0]).toBeCloseTo(300, 1);
+  });
+
+  it("still re-fits on resize after a tap that jittered by a pixel", async () => {
+    const map = await renderMap({}, [400, 300]);
+    await settle(map);
+    const area = areaEl(map, 202);
+    area.dispatchEvent(pointer("pointerdown", 300, 150));
+    area.dispatchEvent(pointer("pointermove", 301, 151, 1));
+    area.dispatchEvent(pointer("pointerup", 301, 151));
+    await settle(map);
+    await resize(map, 600, 700);
+    expect(translation(root(map).querySelector(".dock"))[0]).toBeCloseTo(300, 1);
+  });
+
+  it("keeps the user's view on resize after a drag, until Fit is pressed", async () => {
+    const map = await renderMap({}, [400, 300]);
+    await settle(map);
+    const area = areaEl(map, 202);
+    area.dispatchEvent(pointer("pointerdown", 300, 150));
+    area.dispatchEvent(pointer("pointermove", 340, 150, 1));
+    area.dispatchEvent(pointer("pointerup", 340, 150));
+    await settle(map);
+    const dragged = translation(root(map).querySelector(".dock"));
+
+    await resize(map, 600, 700);
+    expect(translation(root(map).querySelector(".dock"))).toEqual(dragged);
+
+    root(map).querySelector<HTMLButtonElement>(`[aria-label="${DEFAULT_MAP_STRINGS.fit}"]`)?.click();
+    await settle(map);
+    expect(translation(root(map).querySelector(".dock"))[0]).toBeCloseTo(300, 1);
   });
 
   it("survives disconnect and reconnect", async () => {

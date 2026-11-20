@@ -1,17 +1,18 @@
 import Panzoom, { type PanzoomEventDetail, type PanzoomObject } from "@panzoom/panzoom";
-import { mdiFitToScreenOutline, mdiHomeLightningBoltOutline, mdiMinus, mdiPlus } from "@mdi/js";
+import { mdiFitToScreenOutline, mdiFlash, mdiMinus, mdiPlus } from "@mdi/js";
 import { LitElement, css, html, nothing, svg, type PropertyValues } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import type { AreaPreview, MapModel, Marker, Point, Zone } from "../model";
 import { controlStyles } from "../styles";
+import { labelPosition } from "../geo/label";
 import {
-  centroid,
   fitView,
   mapKey,
   polylinePath,
   previewShape,
   ringPath,
   ringWidth,
+  stripeStep,
   toScreen,
   type PreviewShape,
   type View,
@@ -51,7 +52,6 @@ interface AreaShape {
 const TAP_SLOP_PX = 6;
 const ZOOM_STEP = 0.3;
 const PAN_STEP_PX = 48;
-const MIN_STRIPE_PITCH_PX = 2.5;
 const MIN_LABEL_WIDTH_PX = 48;
 const PAN_KEYS: Partial<Record<string, readonly [number, number]>> = {
   ArrowLeft: [PAN_STEP_PX, 0],
@@ -99,16 +99,23 @@ export class MowMap extends LitElement {
     this.panzoom = undefined;
   }
 
-  protected override willUpdate(changed: PropertyValues<this>): void {
+  protected override willUpdate(changed: PropertyValues): void {
     if (changed.has("model")) {
+      const obstacles = (this.model?.obstacles ?? []).map((o) => o.outline);
       this.areaShapes = (this.model?.areas ?? []).map((zone) => ({
         zone,
         d: ringPath(zone.outline),
-        label: centroid(zone.outline),
+        label: labelPosition(zone.outline, obstacles),
         widthM: ringWidth(zone.outline),
       }));
     }
-    if (changed.has("previews")) this.previewShapes = this.previews.map(previewShape);
+    if (changed.has("previews") || changed.has("view")) {
+      this.previewShapes = this.previews.map((preview, i) => {
+        const step = stripeStep(preview.pitchM, this.view.scale);
+        const drawn = changed.has("previews") ? undefined : this.previewShapes[i];
+        return drawn?.step === step ? drawn : previewShape(preview, step);
+      });
+    }
     if (changed.has("route")) this.routePath = (this.route ?? []).map(polylinePath).join("");
   }
 
@@ -178,9 +185,9 @@ export class MowMap extends LitElement {
     return this.previewShapes.map((shape) => {
       const index = clipIndex.get(shape.hash);
       if (index === undefined) return nothing;
-      const pitchPx = (shape.pitch ?? Infinity) * this.view.scale;
       return svg`<g class="preview" clip-path="url(#clip-${index})">
-        <path class="stripes" opacity=${Math.min(1, (pitchPx / MIN_STRIPE_PITCH_PX) ** 2)} d=${shape.stripes} />
+        <path class="stripes" d=${shape.stripes} />
+        ${shape.crossingStripes ? svg`<path class="stripes crossing" d=${shape.crossingStripes} />` : nothing}
         <path class="laps" d=${shape.laps} />
         <path class="obstacle-laps" d=${shape.obstacleLaps} />
       </g>`;
@@ -190,9 +197,9 @@ export class MowMap extends LitElement {
   private renderLabel({ zone, label, widthM }: AreaShape, order: number | undefined) {
     const { x, y } = toScreen(this.view, label);
     const showName = widthM * this.view.scale >= MIN_LABEL_WIDTH_PX;
-    const badgeY = showName ? -10 : 0;
+    const badgeY = showName ? -12 : 0;
     return svg`<g class="label" aria-hidden="true" transform="translate(${x} ${y})">
-      ${showName ? svg`<text class="name" y=${order ? 10 : 0}>${zone.name}</text>` : nothing}
+      ${showName ? svg`<text class="name" y=${order ? 9 : 0}>${zone.name}</text>` : nothing}
       ${order ? svg`<circle class="badge-bg" cy=${badgeY} r="10" /><text class="badge" y=${badgeY}>${order}</text>` : nothing}
     </g>`;
   }
@@ -200,15 +207,15 @@ export class MowMap extends LitElement {
   private renderDock({ position }: Marker) {
     const { x, y } = toScreen(this.view, position);
     return svg`<g class="dock" role="img" aria-label=${this.strings.dock} transform="translate(${x} ${y})">
-      <circle r="13" />
-      <path d=${mdiHomeLightningBoltOutline} transform="translate(-9 -9) scale(0.75)" />
+      <rect x="-12" y="-12" width="24" height="24" rx="6" />
+      <path d=${mdiFlash} transform="translate(-9 -9) scale(0.75)" />
     </g>`;
   }
 
   private renderMower({ position, headingDeg }: Marker) {
     const { x, y } = toScreen(this.view, position);
     return svg`<g class="mower" role="img" aria-label=${this.strings.mower} transform="translate(${x} ${y}) rotate(${headingDeg ?? 0})">
-      <path d="M0 -12L9 10L0 5L-9 10Z" />
+      <path d="M0 -13L10 11L0 6L-10 11Z" />
     </g>`;
   }
 
@@ -229,10 +236,14 @@ export class MowMap extends LitElement {
         canvas: true,
         cursor: "grab",
         touchAction: "none",
+        startX: this.view.x,
+        startY: this.view.y,
+        startScale: this.view.scale,
         minScale: 1e-3,
         maxScale: 1e4,
       }),
     };
+    if (!this.userAdjustedView) this.fit();
   }
 
   private readonly fit = (): void => {
@@ -279,11 +290,11 @@ export class MowMap extends LitElement {
 
   private readonly onViewChange = ({ detail }: CustomEvent<PanzoomEventDetail>) => {
     this.view = { x: detail.x, y: detail.y, scale: detail.scale };
-    if (detail.originalEvent as Event | undefined) this.userAdjustedView = true;
   };
 
   private readonly onWheel = (event: WheelEvent) => {
     this.panzoom?.instance.zoomWithWheel(event);
+    this.userAdjustedView = true;
   };
 
   private readonly onPointerDown = (event: PointerEvent) => {
@@ -291,9 +302,12 @@ export class MowMap extends LitElement {
     if (event.isPrimary) this.gestureStart = { x: event.clientX, y: event.clientY };
   };
 
+  // A tap jitters by a pixel or two; only a real drag or pinch counts as the user moving the view.
   private readonly onPointerMove = (event: PointerEvent) => {
     const { x, y } = this.gestureStart;
-    if (Math.hypot(event.clientX - x, event.clientY - y) > TAP_SLOP_PX) this.dragged = true;
+    if (Math.hypot(event.clientX - x, event.clientY - y) <= TAP_SLOP_PX) return;
+    this.dragged = true;
+    if (event.buttons) this.userAdjustedView = true;
   };
 
   private readonly onMapKey = (event: KeyboardEvent) => {
@@ -385,14 +399,15 @@ export class MowMap extends LitElement {
         stroke-width: 1.5;
       }
       .viewport .stripes {
-        stroke: var(--mmp-path-color);
-        stroke-opacity: 0.5;
+        stroke: color-mix(in srgb, var(--mmp-path-color) 45%, var(--mmp-area-color));
         stroke-width: 1;
       }
+      .viewport .stripes.crossing {
+        stroke: color-mix(in srgb, var(--mmp-path-color) 28%, var(--mmp-area-color));
+      }
       .viewport .laps {
-        stroke: var(--mmp-path-color);
-        stroke-opacity: 0.8;
-        stroke-width: 1.25;
+        stroke: color-mix(in srgb, var(--mmp-path-color) 75%, var(--mmp-area-color));
+        stroke-width: 1.5;
       }
       .viewport .obstacle-laps {
         stroke: var(--mmp-nogo-color);
@@ -423,7 +438,7 @@ export class MowMap extends LitElement {
         fill: var(--text-primary-color, #fff);
         stroke: none;
       }
-      .dock circle {
+      .dock rect {
         fill: var(--mmp-halo-color);
         stroke: var(--secondary-text-color, #727272);
         stroke-width: 1.5;

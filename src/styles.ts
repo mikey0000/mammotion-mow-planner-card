@@ -25,7 +25,7 @@ export const controlStyles = css`
     cursor: default;
     color: var(--disabled-text-color, #9e9e9e);
   }
-  :is(button, input, [tabindex]):focus-visible {
+  :is(button, input, select, summary, [tabindex]):focus-visible {
     outline: 2px solid var(--mmp-accent);
     outline-offset: 2px;
   }

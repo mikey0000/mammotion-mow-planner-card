@@ -25,11 +25,15 @@ const angleModeIcons: Readonly<Record<AngleMode, string>> = {
 
 const EDGE_CHOICES = [0, 0.5] as const;
 
-const DIAL_RADIUS = 16;
-const dialStripes = [-12, -6, 0, 6, 12].map((y) => {
-  const x = Math.sqrt(DIAL_RADIUS ** 2 - y ** 2);
+const DIAL_RADIUS = 27;
+const STRIPE_RADIUS = 20;
+const dialStripes = [-14, -7, 0, 7, 14].map((y) => {
+  const x = Math.sqrt(STRIPE_RADIUS ** 2 - y ** 2);
   return svg`<line x1=${-x} y1=${y} x2=${x} y2=${y}></line>`;
 });
+const dialTicks = svg`<g class="ticks">${[0, 90, 180, 270].map(
+  (angle) => svg`<line y1=${-DIAL_RADIUS} y2=${4 - DIAL_RADIUS} transform="rotate(${angle})"></line>`,
+)}</g>`;
 
 /** Mowing settings form; fully controlled: fires `settings-changed` with a new settings object per change. */
 @customElement("mmp-settings")
@@ -57,26 +61,35 @@ export class MowSettingsPanel extends LitElement {
       }
       .angle {
         display: flex;
-        align-items: flex-end;
-        gap: var(--ha-space-2, 8px);
+        align-items: center;
+        gap: var(--ha-space-3, 12px);
       }
       .angle mmp-slider {
         flex: 1;
         min-width: 0;
       }
       .dial {
-        width: var(--mmp-control-height);
-        height: var(--mmp-control-height);
+        width: 56px;
+        height: 56px;
         flex: none;
+        stroke-linecap: round;
       }
       .dial circle {
         fill: var(--mmp-surface);
         stroke: var(--divider-color, rgba(0, 0, 0, 0.12));
       }
+      .dial .ticks,
+      .dial .baseline {
+        stroke: var(--secondary-text-color, #727272);
+        stroke-width: 1.5;
+        opacity: 0.6;
+      }
+      .dial .baseline {
+        stroke-dasharray: 3 3;
+      }
       .dial .stripes {
         stroke: var(--mmp-accent);
-        stroke-width: 2;
-        stroke-linecap: round;
+        stroke-width: 2.5;
       }
       summary {
         display: flex;
@@ -129,6 +142,7 @@ export class MowSettingsPanel extends LitElement {
               (crossAngle) => ({
                 crossAngle,
               }),
+              90,
             )
           : nothing
       }
@@ -213,9 +227,16 @@ export class MowSettingsPanel extends LitElement {
       angleMode === "random_angle"
         ? nothing
         : html`<div class="angle">
-            ${this.slider("settings.angle_value", this.limits.angle, angle, format, (value) => ({ angle: value }))}
-            <svg class="dial" viewBox="-20 -20 40 40" aria-hidden="true">
-              <circle r="19"></circle>
+            ${this.slider("settings.angle_value", this.limits.angle, angle, format, (value) => ({ angle: value }), 0)}
+            <svg class="dial" viewBox="-30 -30 60 60" aria-hidden="true">
+              <circle r=${DIAL_RADIUS}></circle>
+              ${
+                angleMode === "relative_angle"
+                  ? svg`<line class="baseline" x1=${-DIAL_RADIUS} x2=${DIAL_RADIUS}>
+                      <title>${this.t("angle.optimal_direction")}</title>
+                    </line>`
+                  : dialTicks
+              }
               <g class="stripes" transform="rotate(${-angle})">${dialStripes}</g>
             </svg>
           </div>`
@@ -240,11 +261,9 @@ export class MowSettingsPanel extends LitElement {
     apply: (value: T) => Partial<MowSettings>,
     extra: unknown[] = [],
   ) {
-    const text = this.t(label);
     return html`<div class="field">
-      <span class="secondary" aria-hidden="true">${text}</span>
       <mmp-segmented
-        .label=${text}
+        .label=${this.t(label)}
         .options=${options}
         .value=${value}
         .disabled=${this.disabled}
@@ -262,11 +281,13 @@ export class MowSettingsPanel extends LitElement {
     value: number,
     format: (value: number) => string,
     apply: (value: number) => Partial<MowSettings>,
+    origin?: number,
   ) {
     return html`<mmp-slider
       .label=${this.t(label)}
       .range=${range}
       .value=${value}
+      .origin=${origin}
       .format=${format}
       .language=${this.language}
       .disabled=${this.disabled}

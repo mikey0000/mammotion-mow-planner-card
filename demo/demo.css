@@ -36,12 +36,6 @@ main {
   display: grid;
   gap: 8px;
 }
-ha-card {
-  display: block;
-  background: var(--card-background-color);
-  border: 1px solid var(--divider-color);
-  border-radius: 12px;
-}
 .tile {
   display: flex;
   align-items: center;

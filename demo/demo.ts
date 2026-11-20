@@ -15,7 +15,21 @@ declare global {
   }
 }
 
-if (!customElements.get("ha-card")) customElements.define("ha-card", class extends HTMLElement {});
+/** Stands in for Home Assistant's own card element, which only exists inside HA. */
+class DemoCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" }).innerHTML = `<style>
+      :host {
+        display: block;
+        background: var(--card-background-color);
+        border: 1px solid var(--divider-color);
+        border-radius: 12px;
+      }
+    </style><slot></slot>`;
+  }
+}
+if (!customElements.get("ha-card")) customElements.define("ha-card", DemoCard);
 
 const params = new URLSearchParams(location.search);
 const dark = params.has("dark");

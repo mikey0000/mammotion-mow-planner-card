@@ -1,6 +1,7 @@
 import { css, html, LitElement, type SVGTemplateResult } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { controlStyles } from "../styles";
+import { headStyles } from "./control-head";
 
 export type SegmentValue = string | number;
 
@@ -12,7 +13,7 @@ export interface SegmentOption<T extends SegmentValue = SegmentValue> {
 
 const steps: Readonly<Record<string, number>> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
 
-/** Single-choice control; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
+/** Labelled single-choice control showing the selection as text; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
 @customElement("mmp-segmented")
 export class SegmentedControl extends LitElement {
   @property() label = "";
@@ -22,6 +23,7 @@ export class SegmentedControl extends LitElement {
 
   static override styles = [
     controlStyles,
+    headStyles,
     css`
       :host {
         display: block;
@@ -30,9 +32,7 @@ export class SegmentedControl extends LitElement {
       .group {
         display: grid;
         grid-auto-flow: column;
-        grid-auto-columns: minmax(0, 1fr);
-        gap: var(--ha-space-1, 4px);
-        padding: var(--ha-space-1, 4px);
+        grid-auto-columns: minmax(var(--mmp-control-height), 1fr);
         border-radius: var(--mmp-radius);
         background: var(--mmp-surface);
       }
@@ -42,9 +42,9 @@ export class SegmentedControl extends LitElement {
         justify-content: center;
         gap: var(--ha-space-1, 4px);
         min-width: 0;
-        height: calc(var(--mmp-control-height) - 8px);
+        height: var(--mmp-control-height);
         padding-inline: var(--ha-space-2, 8px);
-        border-radius: calc(var(--mmp-radius) - 4px);
+        border-radius: var(--mmp-radius);
         font-weight: var(--ha-font-weight-medium, 500);
         transition: background-color 120ms;
       }
@@ -74,32 +74,37 @@ export class SegmentedControl extends LitElement {
   ];
 
   protected override render() {
-    return html`<div
-      class="group"
-      role="radiogroup"
-      aria-label=${this.label}
-      @keydown=${(event: KeyboardEvent) => {
-        this.onKeydown(event);
-      }}
-    >
-      ${this.options.map(
-        (option) =>
-          html`<button
-            role="radio"
-            aria-checked=${option.value === this.value ? "true" : "false"}
-            aria-label=${option.label}
-            title=${option.label}
-            tabindex=${option.value === this.value ? 0 : -1}
-            ?disabled=${this.disabled}
-            @click=${() => {
-              this.select(option);
-            }}
-          >
-            ${option.icon && html`<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${option.icon}</svg>`}
-            <span class="text">${option.label}</span>
-          </button>`,
-      )}
-    </div>`;
+    const selected = this.selectedIndex;
+    return html`<div class="head" aria-hidden="true">
+        <span class="secondary">${this.label}</span>
+        <span class="value">${this.options.find((option) => option.value === this.value)?.label}</span>
+      </div>
+      <div
+        class="group"
+        role="radiogroup"
+        aria-label=${this.label}
+        @keydown=${(event: KeyboardEvent) => {
+          this.onKeydown(event);
+        }}
+      >
+        ${this.options.map(
+          (option, index) =>
+            html`<button
+              role="radio"
+              aria-checked=${option.value === this.value ? "true" : "false"}
+              aria-label=${option.label}
+              title=${option.label}
+              tabindex=${index === selected ? 0 : -1}
+              ?disabled=${this.disabled}
+              @click=${() => {
+                this.select(option);
+              }}
+            >
+              ${option.icon && html`<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${option.icon}</svg>`}
+              <span class="text">${option.label}</span>
+            </button>`,
+        )}
+      </div>`;
   }
 
   private select(option: SegmentOption) {
@@ -124,11 +129,14 @@ export class SegmentedControl extends LitElement {
     if (!step) return undefined;
     const horizontal = key === "ArrowLeft" || key === "ArrowRight";
     const flip = horizontal && getComputedStyle(this).direction === "rtl" ? -1 : 1;
-    const current = Math.max(
+    return (this.selectedIndex + step * flip + count) % count;
+  }
+
+  private get selectedIndex() {
+    return Math.max(
       0,
       this.options.findIndex((option) => option.value === this.value),
     );
-    return (current + step * flip + count) % count;
   }
 }
 

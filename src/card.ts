@@ -282,7 +282,21 @@ export class MowPlannerCard extends LitElement {
     return count === 1 ? this.t("summary.area_one") : this.t("summary.areas", { count });
   }
 
-  /** Area count, size, distance and time of the plan, as short phrases. */
+  private get pathLengthM(): number {
+    return this.previews.reduce((sum, preview) => sum + preview.lengthM, 0);
+  }
+
+  private get duration(): string | undefined {
+    const speed = this.settings?.speed ?? 0;
+    if (this.pathLengthM <= 0 || speed <= 0) return undefined;
+    const total = Math.max(1, Math.round(this.pathLengthM / speed / 60));
+    const [hours, minutes] = [Math.floor(total / 60), total % 60];
+    return hours > 0
+      ? this.t("summary.duration_hours", { hours, minutes })
+      : this.t("summary.duration", { minutes });
+  }
+
+  /** Area count, size and time of the plan, as short phrases. */
   private get totals(): string[] {
     const selected = this.selectedAreas;
     const zones = this.map.status === "ready" ? this.map.model.areas : [];
@@ -290,14 +304,10 @@ export class MowPlannerCard extends LitElement {
       (sum, area) => sum + (zones.find((zone) => zone.hash === area.hash)?.areaM2 ?? 0),
       0,
     );
-    const length = this.previews.reduce((sum, preview) => sum + preview.lengthM, 0);
-    const speed = this.settings?.speed ?? 0;
     return [
       this.areaCount(selected.length),
       ...(size > 0 ? [this.t("summary.area_size", { size: Math.round(size) })] : []),
-      ...(length > 0 && speed > 0
-        ? [this.t("summary.duration", { minutes: Math.max(1, Math.round(length / speed / 60)) })]
-        : []),
+      ...(this.duration ? [this.duration] : []),
     ];
   }
 
@@ -322,36 +332,19 @@ export class MowPlannerCard extends LitElement {
   private renderHeader(mower: Mower): TemplateResult {
     const stateKey = `state.${mower.state}`;
     const stateText = stateKey in STATE_KEYS ? this.t(stateKey as StringKey) : this.t("state.unavailable");
+    const battery =
+      mower.battery === undefined
+        ? nothing
+        : html` ·
+            <svg class="icon inline" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(mdiBattery)}</svg>
+            ${this.t("mower.battery", { percent: Math.round(mower.battery) })}`;
     return html`
       <header>
         <div class="title">
-          <h2>${this.config?.title ?? mower.name}</h2>
-          <span class="secondary">
-            ${stateText}${
-              mower.battery === undefined
-                ? nothing
-                : html` ·
-                    <svg class="icon inline" viewBox="0 0 24 24" aria-hidden="true">
-                      ${mdiIcon(mdiBattery)}</svg
-                    >${this.t("mower.battery", { percent: Math.round(mower.battery) })}`
-            }
-          </span>
+          ${this.config?.title || this.mowerIds.length < 2 ? html`<h2>${this.config?.title ?? mower.name}</h2>` : nothing}
+          ${this.mowerIds.length > 1 ? this.renderMowerPicker() : nothing}
+          <span class="secondary">${stateText}${battery}</span>
         </div>
-        ${
-          this.mowerIds.length > 1
-            ? html`<select
-                aria-label=${this.t("mower.pick")}
-                @change=${(event: Event) => (this.mowerId = (event.target as HTMLSelectElement).value)}
-              >
-                ${this.mowerIds.map(
-                  (id) =>
-                    html`<option value=${id} ?selected=${id === this.mowerId}>
-                      ${(this.latestHass && readMower(this.latestHass, id)?.name) ?? id}
-                    </option>`,
-                )}
-              </select>`
-            : nothing
-        }
         <button
           class="icon-button"
           aria-label=${this.t("map.refresh")}
@@ -362,6 +355,23 @@ export class MowPlannerCard extends LitElement {
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(mdiRefresh)}</svg>
         </button>
       </header>
+    `;
+  }
+
+  private renderMowerPicker(): TemplateResult {
+    const hass = this.latestHass;
+    return html`
+      <select
+        aria-label=${this.t("mower.pick")}
+        @change=${(event: Event) => (this.mowerId = (event.target as HTMLSelectElement).value)}
+      >
+        ${this.mowerIds.map(
+          (id) =>
+            html`<option value=${id} ?selected=${id === this.mowerId}>
+              ${(hass && readMower(hass, id)?.name) ?? id}
+            </option>`,
+        )}
+      </select>
     `;
   }
 
@@ -401,7 +411,7 @@ export class MowPlannerCard extends LitElement {
 
   private renderSteps(): TemplateResult {
     return html`
-      <nav aria-label=${this.t("step.review")}>
+      <nav aria-label=${this.t("step.label")}>
         <ol>
           ${STEPS.map(
             (step, index) => html`
@@ -494,6 +504,11 @@ export class MowPlannerCard extends LitElement {
         this.t("settings.blade_height"),
         this.t("unit.mm", { value: settings.bladeHeight }),
       ],
+      this.pathLengthM > 0 && [
+        this.t("review.distance"),
+        this.t("summary.distance", { km: (this.pathLengthM / 1000).toFixed(1) }),
+      ],
+      this.duration !== undefined && [this.t("review.estimate"), this.duration],
     ];
     const canFetchRoute =
       this.config?.exact_route &&
@@ -623,7 +638,6 @@ export class MowPlannerCard extends LitElement {
       }
       ha-card {
         container-type: inline-size;
-        overflow: hidden;
       }
       header {
         display: flex;
@@ -651,10 +665,14 @@ export class MowPlannerCard extends LitElement {
         vertical-align: -2px;
       }
       select {
+        display: block;
         font: inherit;
+        font-size: var(--ha-font-size-l, 16px);
+        font-weight: var(--ha-font-weight-medium, 500);
         color: inherit;
         height: var(--mmp-control-height);
-        max-width: 45%;
+        max-width: 100%;
+        margin-block-end: 2px;
         padding-inline: 12px;
         border: none;
         border-radius: var(--mmp-radius);
@@ -672,9 +690,15 @@ export class MowPlannerCard extends LitElement {
         background: var(--mmp-surface);
       }
       .map {
-        position: relative;
-        height: clamp(220px, 70cqw, 380px);
-        background: var(--mmp-surface);
+        position: sticky;
+        top: calc(var(--header-height, 0px) + var(--safe-area-inset-top, 0px));
+        z-index: 1;
+        height: clamp(200px, 62cqw, 380px);
+        background: color-mix(
+          in srgb,
+          var(--primary-text-color, #212121) 6%,
+          var(--card-background-color, #fff)
+        );
       }
       mmp-map {
         height: 100%;
@@ -693,8 +717,9 @@ export class MowPlannerCard extends LitElement {
       }
       .note {
         position: absolute;
-        inset-inline: 8px;
-        bottom: 8px;
+        inset-inline-start: 8px;
+        top: 8px;
+        max-width: calc(100% - 80px);
         margin: 0;
         padding: 4px 8px;
         width: fit-content;
@@ -814,8 +839,16 @@ export class MowPlannerCard extends LitElement {
         gap: 8px;
       }
       .totals {
-        flex: 1;
+        flex: 1 1 100%;
         min-width: 0;
+      }
+      .actions {
+        flex-wrap: wrap;
+      }
+      @container (min-width: 440px) {
+        .totals {
+          flex-basis: 0;
+        }
       }
       .primary,
       .text-button {
@@ -868,8 +901,11 @@ export class MowPlannerCard extends LitElement {
           grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr);
         }
         .map {
+          position: relative;
+          top: 0;
           height: auto;
           min-height: 420px;
+          border-end-start-radius: var(--ha-card-border-radius, 12px);
         }
       }
     `,

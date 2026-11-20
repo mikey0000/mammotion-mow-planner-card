@@ -14,9 +14,7 @@ import {
   type PathsD,
 } from "clipper2-ts";
 import { boundsOf } from "./bounds";
-import type { AreaPreview, MowSettings, Point, Ring, Zone } from "../model";
-
-type Segment = readonly [Point, Point];
+import type { AreaPreview, MowSettings, Point, Ring, Stripe, Zone } from "../model";
 
 const PRECISION = 3;
 const ARC_TOLERANCE_M = 0.01;
@@ -33,8 +31,9 @@ export function previewArea(
   const boundary = [toPath(area.outline)];
   const directionDeg = normalise(baseDirection(area, settings, angleOffsetDeg));
   const directionExact = settings.angleMode === "absolute_angle" && settings.pattern !== "segment_grid";
-  const preview = { hash: area.hash, directionDeg, directionExact };
-  if (!(Number.isFinite(pitch) && pitch > 0 && Math.abs(areaD(boundary[0] ?? [])) > 1e-6)) {
+  const validPitch = Number.isFinite(pitch) && pitch > 0;
+  const preview = { hash: area.hash, directionDeg, directionExact, pitchM: validPitch ? pitch : 0 };
+  if (!(validPitch && Math.abs(areaD(boundary[0] ?? [])) > 1e-6)) {
     return { ...preview, perimeterLaps: [], obstacleLaps: [], stripes: [], lengthM: 0 };
   }
 
@@ -70,11 +69,11 @@ export function previewArea(
     no_grid: [],
   };
   const centre = boxCentre(area.outline);
-  const stripes = families[settings.pattern].flatMap((extra) =>
-    stripesAcross(region, centre, directionDeg + extra, pitch),
+  const stripes = families[settings.pattern].flatMap((extra, pass) =>
+    stripesAcross(region, centre, directionDeg + extra, pitch, pass ? 1 : 0),
   );
   const lengthM =
-    stripes.reduce((sum, [a, b]) => sum + distance(a, b), 0) +
+    stripes.reduce((sum, { from, to }) => sum + distance(from, to), 0) +
     [...perimeterLaps, ...obstacleLaps].reduce((sum, ring) => sum + perimeterOf(ring), 0);
   return { ...preview, perimeterLaps, obstacleLaps, stripes, lengthM };
 }
@@ -91,7 +90,7 @@ function baseDirection(area: Zone, settings: MowSettings, angleOffsetDeg: number
 }
 
 /** Parallel lines `pitch` apart on a lattice through `centre`, clipped to `region`. */
-function stripesAcross(region: PathsD, centre: Point, deg: number, pitch: number): Segment[] {
+function stripesAcross(region: PathsD, centre: Point, deg: number, pitch: number, pass: 0 | 1): Stripe[] {
   const u = { x: Math.cos(deg * RAD), y: Math.sin(deg * RAD) };
   const n = { x: -u.y, y: u.x };
   const at = (s: number, t: number) => ({ x: centre.x + u.x * s + n.x * t, y: centre.y + u.y * s + n.y * t });
@@ -111,7 +110,9 @@ function stripesAcross(region: PathsD, centre: Point, deg: number, pitch: number
   return open.flatMap((path) => {
     const [a] = path;
     const b = path.at(-1);
-    return a && b && path.length > 1 ? [[toPoint(a), toPoint(b)] as const] : [];
+    return a && b && path.length > 1
+      ? [{ from: toPoint(a), to: toPoint(b), line: Math.round(dot(a, centre, n) / pitch), pass }]
+      : [];
   });
 }
 

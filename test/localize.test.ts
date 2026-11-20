@@ -31,6 +31,29 @@ describe("localize", () => {
     expect(localize(undefined, "action.start")).toBe("Start mowing");
   });
 
+  it("names patterns and mow order like the app", () => {
+    const names = (language: string) =>
+      (
+        ["pattern.single_grid", "pattern.double_grid", "pattern.segment_grid", "pattern.no_grid"] as const
+      ).map((key) => localize(language, key));
+    expect(names("en")).toEqual(["Stripes", "Grid", "Adaptive", "Perimeter"]);
+    expect(names("de")).toEqual(["Streifen", "Gitter", "Adaptiv", "Rand"]);
+    expect(localize("en", "mow_order.grid_first")).toBe("Inside");
+    expect(localize("en", "mow_order.border_first")).toBe("Perimeter");
+    expect(localize("de", "mow_order.grid_first")).toBe("Innen");
+  });
+
+  it("has the card shell strings", () => {
+    expect(localize("en", "summary.duration_hours", { hours: 1, minutes: 5 })).toBe("about 1 h 5 min");
+    expect(localize("de", "summary.duration_hours", { hours: 1, minutes: 5 })).toBe("etwa 1 h 5 min");
+    expect(localize("en", "review.estimate")).toBe("Estimated time");
+    expect(localize("en", "review.distance")).toBe("Path length");
+    expect(localize("en", "step.label")).toBe("Steps");
+    for (const key of ["review.estimate", "review.distance", "step.label"] as const) {
+      expect(german(key), key).not.toBe(localize("en", key));
+    }
+  });
+
   it("has every English key in German, non-empty, with the same placeholders", () => {
     for (const key of Object.keys(en) as StringKey[]) {
       expect(german(key), key).not.toBe("");

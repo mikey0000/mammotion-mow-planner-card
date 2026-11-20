@@ -86,18 +86,28 @@ export interface SettingLimits {
   readonly edgeDistance?: Range;
 }
 
+export interface Stripe {
+  readonly from: Point;
+  readonly to: Point;
+  /** Which parallel pass line this segment lies on; neighbouring lines differ by one. */
+  readonly line: number;
+  /** 1 for the crossing pass of `double_grid`, else 0. */
+  readonly pass: 0 | 1;
+}
+
 export interface AreaPreview {
   readonly hash: number;
   /** Resolved direction of the first pass, degrees counter-clockwise from the map x axis. */
   readonly directionDeg: number;
   /** False when the mower picks the direction itself (relative or random mode). */
   readonly directionExact: boolean;
-  /** Closed lap rings just inside the boundary. */
+  /** Lap rings just inside the boundary; open rings, drawn closed. */
   readonly perimeterLaps: readonly Ring[];
-  /** Closed lap rings around no-go zones. */
+  /** Lap rings around no-go zones; open rings, drawn closed. */
   readonly obstacleLaps: readonly Ring[];
-  /** Straight passes, each a two-point segment. */
-  readonly stripes: readonly (readonly [Point, Point])[];
+  readonly stripes: readonly Stripe[];
+  /** Distance in metres between neighbouring pass lines. */
+  readonly pitchM: number;
   /** Total path length in metres. */
   readonly lengthM: number;
 }

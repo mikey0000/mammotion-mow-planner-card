@@ -2,9 +2,11 @@ import { mdiMinus, mdiPlus } from "@mdi/js";
 import { css, html, LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { live } from "lit/directives/live.js";
+import { styleMap } from "lit/directives/style-map.js";
 import { localize } from "../localize";
 import type { Range } from "../model";
 import { controlStyles } from "../styles";
+import { headStyles } from "./control-head";
 import { mdiIcon } from "./icons";
 
 const decimals = (step: number) => step.toString().split(".")[1]?.length ?? 0;
@@ -12,11 +14,12 @@ const decimals = (step: number) => step.toString().split(".")[1]?.length ?? 0;
 const snap = (value: number, { min, max, step }: Range) =>
   Number(Math.min(max, Math.max(min, min + Math.round((value - min) / step) * step)).toFixed(decimals(step)));
 
-/** Labelled range with − / + steppers; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
+/** Labelled range with − / + steppers, its track filled from `origin` (default: the minimum) to the value; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
 @customElement("mmp-slider")
 export class SliderControl extends LitElement {
   @property() label = "";
   @property({ type: Number }) value = 0;
+  @property({ type: Number }) origin?: number;
   @property({ attribute: false }) range: Range = { min: 0, max: 100, step: 1 };
   @property({ attribute: false }) format: (value: number) => string = String;
   @property() language?: string;
@@ -24,18 +27,10 @@ export class SliderControl extends LitElement {
 
   static override styles = [
     controlStyles,
+    headStyles,
     css`
       :host {
         display: block;
-      }
-      .head {
-        display: flex;
-        justify-content: space-between;
-        gap: var(--ha-space-2, 8px);
-      }
-      .value {
-        font-weight: var(--ha-font-weight-medium, 500);
-        white-space: nowrap;
       }
       .row {
         display: flex;
@@ -61,41 +56,52 @@ export class SliderControl extends LitElement {
         appearance: none;
         -webkit-appearance: none;
         cursor: pointer;
+        --mmp-thumb: 28px;
+        --mmp-fill: var(--mmp-accent);
+        --mmp-fill-dir: to right;
+        --mmp-from: calc(var(--mmp-thumb) / 2 + var(--mmp-fill-from) * (100% - var(--mmp-thumb)));
+        --mmp-to: calc(var(--mmp-thumb) / 2 + var(--mmp-fill-to) * (100% - var(--mmp-thumb)));
+        --mmp-track: linear-gradient(
+          var(--mmp-fill-dir),
+          var(--mmp-tint) var(--mmp-from),
+          var(--mmp-fill) var(--mmp-from) var(--mmp-to),
+          var(--mmp-tint) var(--mmp-to)
+        );
+      }
+      input:dir(rtl) {
+        --mmp-fill-dir: to left;
       }
       input:disabled {
         cursor: default;
+        --mmp-fill: var(--disabled-text-color, #9e9e9e);
       }
       input::-webkit-slider-runnable-track {
         height: 8px;
         border-radius: 4px;
-        background: var(--mmp-tint);
+        background: var(--mmp-track);
       }
       input::-moz-range-track {
         height: 8px;
         border-radius: 4px;
-        background: var(--mmp-tint);
+        background: var(--mmp-track);
       }
       input::-webkit-slider-thumb {
         -webkit-appearance: none;
-        width: 22px;
-        height: 22px;
-        margin-top: -7px;
-        border: none;
+        box-sizing: border-box;
+        width: var(--mmp-thumb);
+        height: var(--mmp-thumb);
+        margin-top: calc(4px - var(--mmp-thumb) / 2);
+        border: 3px solid transparent;
         border-radius: 50%;
-        background: var(--mmp-accent);
+        background: var(--mmp-fill) padding-box;
       }
       input::-moz-range-thumb {
-        width: 22px;
-        height: 22px;
-        border: none;
+        box-sizing: border-box;
+        width: var(--mmp-thumb);
+        height: var(--mmp-thumb);
+        border: 3px solid transparent;
         border-radius: 50%;
-        background: var(--mmp-accent);
-      }
-      input:disabled::-webkit-slider-thumb {
-        background: var(--disabled-text-color, #9e9e9e);
-      }
-      input:disabled::-moz-range-thumb {
-        background: var(--disabled-text-color, #9e9e9e);
+        background: var(--mmp-fill) padding-box;
       }
     `,
   ];
@@ -103,9 +109,11 @@ export class SliderControl extends LitElement {
   protected override render() {
     const { min, max, step } = this.range;
     const name = { name: this.label };
+    const position = (value: number) => (Math.min(max, Math.max(min, value)) - min) / (max - min || 1);
+    const ends = [position(this.origin ?? min), position(this.value)];
     return html`<div class="head">
         <label class="secondary" for="range">${this.label}</label>
-        <span class="value">${this.format(this.value)}</span>
+        <span class="value" aria-hidden="true">${this.format(this.value)}</span>
       </div>
       <div class="row">
         <button
@@ -124,6 +132,10 @@ export class SliderControl extends LitElement {
           max=${max}
           step=${step}
           aria-valuetext=${this.format(this.value)}
+          style=${styleMap({
+            "--mmp-fill-from": String(Math.min(...ends)),
+            "--mmp-fill-to": String(Math.max(...ends)),
+          })}
           .value=${live(String(this.value))}
           ?disabled=${this.disabled}
           @input=${(event: Event) => {

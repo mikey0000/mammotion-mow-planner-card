@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { previewArea } from "../../src/geo/preview";
-import type { MowSettings, Point, Zone } from "../../src/model";
+import type { MowSettings, Point, Stripe, Zone } from "../../src/model";
 
 const zone = (outline: [number, number][], hash = 1): Zone => ({
   hash,
@@ -34,10 +34,10 @@ const settings = (overrides: Partial<MowSettings> = {}): MowSettings => ({
 });
 
 const EPS = 1e-6;
-const len = ([a, b]: readonly [Point, Point]) => Math.hypot(b.x - a.x, b.y - a.y);
-const deg = ([a, b]: readonly [Point, Point]) =>
+const len = ({ from: a, to: b }: Stripe) => Math.hypot(b.x - a.x, b.y - a.y);
+const deg = ({ from: a, to: b }: Stripe) =>
   ((((Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI) % 180) + 180) % 180;
-const mid = ([a, b]: readonly [Point, Point]): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+const mid = ({ from: a, to: b }: Stripe): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 const perimeter = (ring: readonly Point[]) =>
   ring.reduce((sum, p, i) => {
     const q = ring[(i + 1) % ring.length] ?? p;
@@ -60,9 +60,10 @@ describe("previewArea on a 20 x 10 m rectangle", () => {
     expect(directionDeg).toBe(0);
     expect(directionExact).toBe(true);
     expect(stripes).toHaveLength(31);
-    for (const [a, b] of stripes) {
+    for (const stripe of stripes) {
+      const { from: a, to: b } = stripe;
       expect(a.y).toBeCloseTo(b.y, 6);
-      expect(len([a, b])).toBeCloseTo(19.4, 2);
+      expect(len(stripe)).toBeCloseTo(19.4, 2);
       for (const p of [a, b]) {
         expect(p.x).toBeGreaterThanOrEqual(0.3 - EPS);
         expect(p.x).toBeLessThanOrEqual(19.7 + EPS);
@@ -70,14 +71,29 @@ describe("previewArea on a 20 x 10 m rectangle", () => {
         expect(p.y).toBeLessThanOrEqual(9.7 + EPS);
       }
     }
-    expect(stripes.map(([a]) => a.y).sort((p, q) => p - q)[0]).toBeCloseTo(0.5, 6);
+    expect(stripes.map(({ from }) => from.y).sort((p, q) => p - q)[0]).toBeCloseTo(0.5, 6);
   });
 
   it("lays vertical stripes at 90 degrees", () => {
     const { stripes, directionDeg } = previewArea(field, [], settings({ angle: 90 }));
     expect(directionDeg).toBe(90);
     expect(stripes).toHaveLength(65);
-    for (const [a, b] of stripes) expect(a.x).toBeCloseTo(b.x, 6);
+    for (const { from, to } of stripes) expect(from.x).toBeCloseTo(to.x, 6);
+  });
+
+  it("numbers the pass lines with consecutive integers in offset order", () => {
+    const { stripes, pitchM } = previewArea(field, [], settings({ angle: 30 }));
+    const offset = ({ from }: Stripe) => -from.x * Math.sin(Math.PI / 6) + from.y * Math.cos(Math.PI / 6);
+    const sorted = [...stripes].sort((p, q) => offset(p) - offset(q));
+    const lines = sorted.map(({ line }) => line);
+    expect(lines).toEqual(Array.from({ length: lines.length }, (_, i) => (lines[0] ?? 0) + i));
+    expect(pitchM).toBe(0.3);
+    expect(stripes.every(({ pass }) => pass === 0)).toBe(true);
+  });
+
+  it("reports the pitch in metres", () => {
+    expect(previewArea(field, [], settings({ spacingCm: 8 })).pitchM).toBeCloseTo(0.08, 12);
+    expect(previewArea(field, [], settings({ pattern: "no_grid", spacingCm: 25 })).pitchM).toBe(0.25);
   });
 
   it("normalises the direction to [0, 180)", () => {
@@ -135,8 +151,16 @@ describe("previewArea on concave areas", () => {
 
   it("splits stripes across the notch and keeps them inside", () => {
     const { stripes } = previewArea(u, [], settings());
-    const upper = stripes.filter(([a]) => a.y > 11);
-    expect(upper.length).toBe(2 * new Set(upper.map(([a]) => a.y.toFixed(3))).size);
+    const upper = stripes.filter(({ from }) => from.y > 11);
+    expect(upper.length).toBe(2 * new Set(upper.map(({ from }) => from.y.toFixed(3))).size);
+    for (const line of new Set(upper.map((stripe) => stripe.line))) {
+      const segments = upper.filter((stripe) => stripe.line === line);
+      expect(segments).toHaveLength(2);
+      expect(new Set(segments.map(({ from }) => from.y.toFixed(6))).size).toBe(1);
+    }
+    expect(new Set(stripes.filter(({ from }) => from.y < 9).map(({ line }) => line)).size).toBe(
+      stripes.filter(({ from }) => from.y < 9).length,
+    );
     for (const s of stripes) {
       expect(inside(mid(s), u.outline)).toBe(true);
       const { x, y } = mid(s);
@@ -153,9 +177,9 @@ describe("previewArea with obstacles", () => {
   const preview = previewArea(square, [tree, farAway], s);
 
   it("keeps stripes out of the outset obstacle", () => {
-    const crossing = preview.stripes.filter(([a]) => a.y > 8 && a.y < 12);
+    const crossing = preview.stripes.filter(({ from }) => from.y > 8 && from.y < 12);
     expect(crossing.length).toBeGreaterThan(0);
-    for (const [a, b] of crossing) {
+    for (const { from: a, to: b } of crossing) {
       const [lo, hi] = [Math.min(a.x, b.x), Math.max(a.x, b.x)];
       expect(hi <= 7.4 + 1e-3 || lo >= 12.6 - 1e-3).toBe(true);
     }
@@ -239,6 +263,7 @@ describe("previewArea patterns", () => {
     expect(directionDeg).toBe(0);
     expect(stripes.filter((s) => deg(s) < 1)).toHaveLength(31);
     expect(stripes.filter((s) => Math.abs(deg(s) - 90) < 1)).toHaveLength(65);
+    for (const s of stripes) expect(s.pass).toBe(deg(s) < 1 ? 0 : 1);
 
     const skew = previewArea(field, [], settings({ pattern: "double_grid", crossAngle: 60 })).stripes;
     expect(skew.some((s) => Math.abs(deg(s) - 60) < 0.5)).toBe(true);
