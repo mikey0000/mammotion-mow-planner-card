@@ -4,7 +4,7 @@ import { property } from "lit/decorators.js";
 import { controlStyles } from "../styles";
 import { headStyles } from "./control-head";
 
-export type SegmentValue = string | number;
+export type SegmentValue = string | number | boolean;
 
 export interface SegmentOption<T extends SegmentValue = SegmentValue> {
   readonly value: T;
@@ -19,7 +19,7 @@ export class SegmentedControl extends LitElement {
   @property() label = "";
   @property({ attribute: false }) options: readonly SegmentOption[] = [];
   @property({ attribute: false }) value?: SegmentValue;
-  @property({ type: Boolean }) disabled = false;
+  @property({ type: Boolean, reflect: true }) disabled = false;
 
   static override styles = [
     controlStyles,

@@ -9,6 +9,9 @@ export const headStyles = css`
     gap: var(--ha-space-2, 8px);
     margin-block-end: var(--ha-space-1, 4px);
   }
+  :host([disabled]) .head > * {
+    color: var(--disabled-text-color, #9e9e9e);
+  }
   .value {
     font-weight: var(--ha-font-weight-medium, 500);
     white-space: nowrap;

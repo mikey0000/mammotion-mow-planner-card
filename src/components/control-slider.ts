@@ -23,7 +23,7 @@ export class SliderControl extends LitElement {
   @property({ attribute: false }) range: Range = { min: 0, max: 100, step: 1 };
   @property({ attribute: false }) format: (value: number) => string = String;
   @property() language?: string;
-  @property({ type: Boolean }) disabled = false;
+  @property({ type: Boolean, reflect: true }) disabled = false;
 
   static override styles = [
     controlStyles,
