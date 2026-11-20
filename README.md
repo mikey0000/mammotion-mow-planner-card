@@ -13,7 +13,7 @@ The card reads the map and your current settings from the integration. A job is 
 ## Requirements
 
 - Home Assistant 2024.11 or newer.
-- The Mammotion integration, with at least one mower that has a map.
+- The Mammotion integration, with at least one mower that has a map. Changing a running job works best with a version whose mower entity has the `running_job` and `running_job_modifiable` attributes; see [During a job](#during-a-job).
 
 ## Install
 
@@ -68,18 +68,17 @@ The mower measures custom angles in its own map frame, which can be rotated from
 - The preview cannot show the route the mower will actually take. `exact_route: true` adds a button that, after you confirm, asks the mower to plan the job without starting and then fetches that route. Planning drops a paused job on the mower. It depends on integration behaviour that is not reliable yet, so it may report that the mower shared no route, or show the route of an earlier job.
 - A setting whose entity is missing or has no value is left out of the start command unless you change it, so the job uses the integration's own value.
 - Obstacle detection is offered only when its entity lists one of the option sets the integration is known to produce, because the code sent for **Off** differs between them.
-- Starting a job while the mower is returning from a finished job ends that job first. The card warns you in the review step.
+- Starting a job while the mower is busy without a job to change, such as on its way home from a finished one, ends what it is doing first. The card warns you in the review step.
+- Loading the map makes the integration start a five-minute status stream from the mower. The card loads the map once per mower and again when you press refresh.
+- On a touchscreen one finger scrolls the dashboard; use two fingers, or the buttons, to move and zoom the map.
 
 ### During a job
 
-While the mower is mowing, paused or returning with a job not yet finished, the card changes that job instead of starting a new one. Areas are locked, and only pattern, path spacing, no-go zone laps, speed, cutting height, obstacle detection and start progress can be changed; the rest are greyed out. **Apply changes** sends only what you changed, through `mammotion.modify_running_job`, after you confirm.
+While the mower has a job under way, the card changes that job instead of starting a new one. Areas are locked to the job's own, and only pattern, path spacing, no-go zone laps, speed, cutting height, obstacle detection, start progress and auto-reverse direction can be changed; the rest are greyed out. **Apply changes** sends only what you changed, through `mammotion.modify_running_job`, after you confirm.
 
-- The settings shown are the integration's planning values, not the running job's own, which the integration does not expose.
-- The integration's own test for a running job reads values no entity exposes, so the card goes by the mower state and the progress sensor. If they disagree, the integration refuses the change and the card says so.
+- The integration reports whether a job is running, whether it can be changed, and the job's own settings. The card shows those values; a setting the job does not report shows the integration's planning value.
 - The original Luba cannot change a running job, so every setting is greyed out on it.
-- Auto-reverse direction stays greyed out during a job: the integration currently resets it to the job's value before sending.
-- Loading the map makes the integration start a five-minute status stream from the mower. The card loads the map once per mower and again when you press refresh.
-- On a touchscreen one finger scrolls the dashboard; use two fingers, or the buttons, to move and zoom the map.
+- With an older integration that lacks these attributes, the card guesses: a job counts as running while the mower is mowing, paused or returning short of 100 % progress, the settings shown are the planning values, a mower without the random path angle is taken for the original Luba, and auto-reverse direction stays greyed out because that integration drops it from a running job. If the guess is wrong, the integration refuses the change and the card says so.
 
 ## Development
 
@@ -89,7 +88,7 @@ npm run demo    # http://localhost:5173/demo/ with a mock Home Assistant
 npm run check   # typecheck, lint, tests and build
 ```
 
-The demo page runs the card against made-up mowers: a docked Luba 2, a docked Yuka with a grass collector, and a Yuka Mini that is mowing. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty` or `?map=error` to the URL to try other states.
+The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a paused Yuka with a grass collector whose integration lacks the running-job attributes, to show the fallback. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty` or `?map=error` to the URL to try other states.
 
 `npm run build` writes `dist/mammotion-mow-planner-card.js`. Pushing a `v*` tag builds it and attaches it to the GitHub release, which is what HACS installs.
 
