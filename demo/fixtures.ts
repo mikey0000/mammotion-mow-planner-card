@@ -124,6 +124,8 @@ interface DemoMower {
   readonly dumpInterval?: number;
   /** Job progress in percent. */
   readonly progress: number;
+  /** The `running_job` attribute; left out to stand for an integration that predates it. */
+  readonly runningJob?: Readonly<Record<string, unknown>> | null;
   readonly features: Feature[];
 }
 
@@ -141,6 +143,7 @@ const MOWERS: readonly DemoMower[] = [
     detection: ["off", "standard", "sensitive"],
     switches: {},
     progress: 0,
+    runningJob: null,
     features: GARDEN,
   },
   {
@@ -155,13 +158,33 @@ const MOWERS: readonly DemoMower[] = [
     detection: ["off", "standard", "sensitive"],
     switches: { auto_change_direction: false },
     progress: 42,
+    runningJob: {
+      areas: [5500000000001],
+      toward: 15,
+      toward_mode: 1,
+      toward_included_angle: 90,
+      mowing_laps: 2,
+      ride_boundary_distance: 0,
+      job_mode: 4,
+      job_id: 1,
+      job_version: 0,
+      speed: 0.5,
+      channel_width: 12,
+      ultra_wave: 11,
+      channel_mode: 0,
+      blade_height: 0,
+      auto_change_direction: 1,
+      border_mode: 1,
+      obstacle_laps: 2,
+      start_progress: 10,
+    },
     features: PADDOCK,
   },
   {
     slug: "yuka",
     name: "Yuka",
     model: "Yuka 1500",
-    state: "docked",
+    state: "paused",
     battery: 100,
     position: [-21, -14.4],
     spacing: [20, 35, 25],
@@ -169,7 +192,7 @@ const MOWERS: readonly DemoMower[] = [
     detection: ["off", "slow_touch", "less_touch", "standard"],
     switches: { is_mow: true, is_dump: true, is_edge: false },
     dumpInterval: 20,
-    progress: 0,
+    progress: 30,
     features: GARDEN,
   },
 ];
@@ -198,7 +221,13 @@ function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntr
     });
   const [lon, lat] = lonLat(mower.position);
   return [
-    entity(`lawn_mower.${mower.slug}`, undefined, mower.state, { friendly_name: mower.name }),
+    entity(`lawn_mower.${mower.slug}`, undefined, mower.state, {
+      friendly_name: mower.name,
+      ...(mower.runningJob !== undefined && {
+        running_job: mower.runningJob,
+        running_job_modifiable: mower.runningJob !== null,
+      }),
+    }),
     entity(`device_tracker.${mower.slug}`, "device_tracker", "home", {
       latitude: lat,
       longitude: lon,
