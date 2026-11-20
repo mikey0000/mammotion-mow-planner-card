@@ -76,7 +76,7 @@ export function makeHass(
 
 const LAPS = ["none", "one", "two", "three", "four"];
 
-/** A Luba-style mower with every planning entity, named "Luba" on device "dev1". */
+/** A mower with every planning entity, grass collection included, named "Luba" on device "dev1". */
 export function lubaEntities(deviceId = "dev1", slug = "luba"): FakeEntity[] {
   const on = (key: string, entity_id: string, state: string, attributes: Record<string, unknown> = {}) => ({
     entity_id,
@@ -112,6 +112,16 @@ export function lubaEntities(deviceId = "dev1", slug = "luba"): FakeEntity[] {
       max: 1,
       step: 0.1,
     }),
+    on("bypass_mode", `select.${slug}_bypass_mode`, "standard", {
+      options: ["off", "standard", "sensitive"],
+    }),
+    on("start_progress", `number.${slug}_start_progress`, "0", { min: 0, max: 99, step: 1 }),
+    on("dumping_interval", `number.${slug}_dumping_interval`, "20", { min: 5, max: 100, step: 1 }),
+    on("auto_change_direction", `switch.${slug}_auto_change_direction`, "on"),
+    on("is_mow", `switch.${slug}_is_mow`, "on"),
+    on("is_dump", `switch.${slug}_is_dump`, "off"),
+    on("is_edge", `switch.${slug}_is_edge`, "on"),
+    on("progress", `sensor.${slug}_progress`, "40", { unit_of_measurement: "%" }),
     on("area", `switch.${slug}_area_front`, "on", { friendly_name: "Luba Area Front", hash: 111 }),
     on("area_plain", `switch.${slug}_back_lawn`, "off", { friendly_name: "Luba Back lawn", hash: 222 }),
     on("device_tracker", `device_tracker.${slug}`, "not_home", {

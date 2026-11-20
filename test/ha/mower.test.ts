@@ -4,6 +4,8 @@ import {
   fetchMap,
   fetchPlannedRoute,
   findMowers,
+  modifyJobData,
+  modifyRunningJob,
   mowerName,
   readMower,
   startMow,
@@ -27,6 +29,13 @@ const PLANNING_IDS = [
   "number.luba_working_speed",
   "number.luba_blade_height",
   "number.luba_ride_boundary_distance",
+  "select.luba_bypass_mode",
+  "number.luba_start_progress",
+  "number.luba_dumping_interval",
+  "switch.luba_auto_change_direction",
+  "switch.luba_is_mow",
+  "switch.luba_is_dump",
+  "switch.luba_is_edge",
 ];
 
 function readLuba(changes: Parameters<typeof withChanges>[1] = {}) {
@@ -56,6 +65,21 @@ const ALL_HELD = [
   "speed",
   "bladeHeight",
   "edgeDistance",
+  "obstacleDetection",
+  "startProgress",
+  "dumpInterval",
+  "autoChangeDirection",
+  "cutGrass",
+  "dumpGrass",
+  "cutEdges",
+];
+
+const SWITCHES = ["autoChangeDirection", "cutGrass", "dumpGrass", "cutEdges"];
+
+const NEW_DETECTION = [
+  { key: "off", code: 1 },
+  { key: "standard", code: 10 },
+  { key: "sensitive", code: 11 },
 ];
 
 const FALLBACK_SETTINGS = {
@@ -114,6 +138,10 @@ describe("readMower", () => {
         speed: { min: 0.2, max: 0.6, step: 0.1 },
         bladeHeight: { min: 25, max: 70, step: 1 },
         edgeDistance: { min: 0, max: 1, step: 0.1 },
+        obstacleDetection: NEW_DETECTION,
+        startProgress: { min: 0, max: 99, step: 1 },
+        dumpInterval: { min: 5, max: 100, step: 1 },
+        switches: SWITCHES,
       },
       settings: {
         pattern: "double_grid",
@@ -127,6 +155,13 @@ describe("readMower", () => {
         speed: 0.4,
         bladeHeight: 55,
         edgeDistance: 0.5,
+        obstacleDetection: 10,
+        startProgress: 0,
+        dumpInterval: 20,
+        autoChangeDirection: true,
+        cutGrass: true,
+        dumpGrass: false,
+        cutEdges: true,
       },
       heldSettings: ALL_HELD,
     });
@@ -203,7 +238,19 @@ describe("readMower", () => {
     const mower = readLuba(Object.fromEntries(PLANNING_IDS.map((id) => [id, { state: "unknown" }])));
 
     expect(mower?.limits.angleModes).toContain("random_angle");
-    expect(mower?.settings).toEqual({ ...FALLBACK_SETTINGS, bladeHeight: 48, edgeDistance: 0.5 });
+    expect(mower?.limits.switches).toEqual(SWITCHES);
+    expect(mower?.settings).toEqual({
+      ...FALLBACK_SETTINGS,
+      bladeHeight: 48,
+      edgeDistance: 0.5,
+      obstacleDetection: 1,
+      startProgress: 0,
+      dumpInterval: 10,
+      autoChangeDirection: false,
+      cutGrass: true,
+      dumpGrass: true,
+      cutEdges: false,
+    });
     expect(mower?.heldSettings).toEqual([]);
   });
 
@@ -212,12 +259,18 @@ describe("readMower", () => {
       "number.luba_blade_height": { state: "unknown" },
       "select.luba_border_mode": { state: "unavailable" },
       "number.luba_path_spacing": null,
+      "switch.luba_is_edge": { state: "unknown" },
     });
 
     expect(mower?.heldSettings).toEqual(
-      ALL_HELD.filter((name) => !["bladeHeight", "mowOrder", "spacingCm"].includes(name)),
+      ALL_HELD.filter((name) => !["bladeHeight", "mowOrder", "spacingCm", "cutEdges"].includes(name)),
     );
-    expect(mower?.settings).toMatchObject({ bladeHeight: 48, mowOrder: "border_first", spacingCm: 25 });
+    expect(mower?.settings).toMatchObject({
+      bladeHeight: 48,
+      mowOrder: "border_first",
+      spacingCm: 25,
+      cutEdges: false,
+    });
   });
 
   it("reads Yuka-style limits and clamps the held spacing into them", () => {
@@ -299,6 +352,120 @@ describe("readMower", () => {
     const mower = readLuba({ "device_tracker.luba": { attributes: { latitude: 1, longitude: 2 } } });
 
     expect(mower?.position).toEqual({ lon: 2, lat: 1 });
+  });
+});
+
+describe("readMower obstacle detection", () => {
+  const detection = (options: readonly string[], state: string) =>
+    readLuba({ "select.luba_bypass_mode": { state, attributes: { options } } });
+
+  it.each([
+    [["off", "slow_touch", "less_touch"], "off", 0],
+    [["off", "slow_touch", "less_touch"], "less_touch", 2],
+    [["off", "slow_touch", "less_touch", "standard"], "off", 0],
+    [["off", "slow_touch", "less_touch", "standard"], "standard", 10],
+    [["off", "standard", "sensitive"], "off", 1],
+    [["off", "standard", "sensitive"], "sensitive", 11],
+  ])("reads %j at %s as ultra_wave %d", (options, state, code) => {
+    const mower = detection(options, state);
+
+    expect(mower?.limits.obstacleDetection?.map((option) => option.key)).toEqual(options);
+    expect(mower?.settings.obstacleDetection).toBe(code);
+    expect(mower?.heldSettings).toContain("obstacleDetection");
+  });
+
+  it.each([
+    [["off", "standard"]],
+    [["off", "standard", "sensitive", "proactive"]],
+    [["standard", "off", "sensitive"]],
+  ])("offers no detection choice for the unknown list %j, whose codes cannot be told", (options) => {
+    const mower = detection(options, "off");
+
+    expect(mower?.limits).not.toHaveProperty("obstacleDetection");
+    expect(mower?.settings).not.toHaveProperty("obstacleDetection");
+    expect(mower?.heldSettings).not.toContain("obstacleDetection");
+  });
+});
+
+describe("readMower switches", () => {
+  it("offers only the switches the mower has", () => {
+    const mower = readLuba({
+      "switch.luba_is_mow": null,
+      "switch.luba_is_dump": null,
+      "switch.luba_is_edge": null,
+    });
+
+    expect(mower?.limits.switches).toEqual(["autoChangeDirection"]);
+    expect(mower?.settings).not.toHaveProperty("cutGrass");
+  });
+
+  it("leaves the switches out without any", () => {
+    const mower = readLuba({
+      "switch.luba_auto_change_direction": null,
+      "switch.luba_is_mow": null,
+      "switch.luba_is_dump": { state: "unavailable" },
+      "switch.luba_is_edge": null,
+      "number.luba_dumping_interval": null,
+    });
+
+    expect(mower?.limits).not.toHaveProperty("switches");
+    expect(mower?.limits).not.toHaveProperty("dumpInterval");
+  });
+});
+
+describe("readMower running job", () => {
+  const CHANGEABLE = [
+    "pattern",
+    "spacingCm",
+    "obstacleLaps",
+    "speed",
+    "bladeHeight",
+    "obstacleDetection",
+    "startProgress",
+  ];
+
+  it.each(["mowing", "paused", "returning"])("lists what can change on a %s job", (state) => {
+    expect(readLuba({ "lawn_mower.luba": { state } })?.runningJob).toEqual({ changeable: CHANGEABLE });
+  });
+
+  it.each(["docked", "idle", "error", "unavailable"])("has no running job while %s", (state) => {
+    expect(readLuba({ "lawn_mower.luba": { state } })).not.toHaveProperty("runningJob");
+  });
+
+  it("has no running job once the job reports 100 %, such as on the way home", () => {
+    const mower = readLuba({
+      "lawn_mower.luba": { state: "returning" },
+      "sensor.luba_progress": { state: "100" },
+    });
+
+    expect(mower).not.toHaveProperty("runningJob");
+  });
+
+  it("counts an active job as running without a progress sensor", () => {
+    const mower = readLuba({ "lawn_mower.luba": { state: "mowing" }, "sensor.luba_progress": null });
+
+    expect(mower?.runningJob?.changeable).toEqual(CHANGEABLE);
+  });
+
+  it("allows no change on a mower without random angle, the original Luba", () => {
+    const mower = readLuba({
+      "lawn_mower.luba": { state: "mowing" },
+      "select.luba_cutting_angle_mode": {
+        state: "relative_angle",
+        attributes: { options: ["relative_angle", "absolute_angle"] },
+      },
+    });
+
+    expect(mower?.runningJob).toEqual({ changeable: [] });
+  });
+
+  it("allows no change when the angle mode cannot be read", () => {
+    const mower = readLuba({
+      "lawn_mower.luba": { state: "mowing" },
+      "select.luba_cutting_angle_mode": null,
+    });
+
+    expect(mower?.runningJob).toEqual({ changeable: [] });
   });
 });
 
@@ -446,12 +613,82 @@ describe("startMowData", () => {
     expect(data).toEqual({ areas });
   });
 
+  it("encodes detection, start progress, the switches and the dumping interval", () => {
+    const data = startMowData(
+      {
+        ...settings,
+        obstacleDetection: 11,
+        startProgress: 24.6,
+        autoChangeDirection: true,
+        cutGrass: false,
+        dumpGrass: true,
+        cutEdges: false,
+        dumpInterval: 30.2,
+      },
+      [
+        "obstacleDetection",
+        "startProgress",
+        "autoChangeDirection",
+        "cutGrass",
+        "dumpGrass",
+        "cutEdges",
+        "dumpInterval",
+      ],
+      areas,
+    );
+
+    expect(data).toEqual({
+      areas,
+      ultra_wave: 11,
+      start_progress: 25,
+      auto_change_direction: 1,
+      is_mow: false,
+      is_dump: true,
+      is_edge: false,
+      collect_grass_frequency: 30,
+    });
+  });
+
+  it("sends auto-reverse off as 0", () => {
+    expect(startMowData({ ...settings, autoChangeDirection: false }, ["autoChangeDirection"], areas)).toEqual(
+      {
+        areas,
+        auto_change_direction: 0,
+      },
+    );
+  });
+
   it("copies the area list in mowing order", () => {
     const order = ["switch.b", "switch.a"];
     const data = startMowData(settings, [], order);
     order.push("switch.c");
 
     expect(data.areas).toEqual(["switch.b", "switch.a"]);
+  });
+});
+
+describe("modifyJobData", () => {
+  it("sends only the named settings, without areas", () => {
+    const settings: MowSettings = {
+      pattern: "double_grid",
+      angleMode: "relative_angle",
+      angle: 10,
+      crossAngle: 90,
+      spacingCm: 25,
+      perimeterLaps: 1,
+      obstacleLaps: 2,
+      mowOrder: "border_first",
+      speed: 0.5,
+      bladeHeight: 40,
+      obstacleDetection: 10,
+    };
+
+    expect(modifyJobData(settings, ["speed", "bladeHeight", "obstacleDetection"])).toEqual({
+      speed: 0.5,
+      blade_height: 40,
+      ultra_wave: 10,
+    });
+    expect(modifyJobData(settings, [])).toEqual({});
   });
 });
 
@@ -525,5 +762,32 @@ describe("startMow", () => {
     });
 
     await expect(startMow(hass, "lawn_mower.luba", {})).rejects.toThrow("refused");
+  });
+});
+
+describe("modifyRunningJob", () => {
+  it("calls mammotion.modify_running_job on the mower with the data", async () => {
+    const hass = makeHass([]);
+
+    await modifyRunningJob(hass, "lawn_mower.luba", { speed: 0.4 });
+
+    expect(hass.calls).toEqual([
+      {
+        domain: "mammotion",
+        service: "modify_running_job",
+        data: { speed: 0.4 },
+        target: { entity_id: "lawn_mower.luba" },
+        notifyOnError: true,
+        returnResponse: false,
+      },
+    ]);
+  });
+
+  it("propagates a rejected call", async () => {
+    const hass = makeHass([], [], () => {
+      throw new Error("no running job");
+    });
+
+    await expect(modifyRunningJob(hass, "lawn_mower.luba", {})).rejects.toThrow("no running job");
   });
 });

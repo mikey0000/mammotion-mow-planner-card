@@ -392,3 +392,103 @@ describe("<mow-planner-settings> interaction", () => {
     expect(seen?.composed).toBe(true);
   });
 });
+
+describe("<mow-planner-settings> job and collection settings", () => {
+  const extras: Overrides = {
+    settings: {
+      obstacleDetection: 10,
+      startProgress: 20,
+      autoChangeDirection: false,
+      cutGrass: true,
+      dumpGrass: true,
+      cutEdges: false,
+      dumpInterval: 15,
+    },
+    limits: {
+      obstacleDetection: [
+        { key: "off", code: 1 },
+        { key: "standard", code: 10 },
+        { key: "sensitive", code: 11 },
+      ],
+      startProgress: { min: 0, max: 99, step: 1 },
+      dumpInterval: { min: 5, max: 100, step: 1 },
+      switches: ["autoChangeDirection", "cutGrass", "dumpGrass", "cutEdges"],
+    },
+  };
+
+  it("offers the mower's obstacle detection modes and sends the chosen code", async () => {
+    const { el, events } = await mount(extras);
+    expect(radios(group(el, "Obstacle detection")).map((r) => r.getAttribute("aria-label"))).toEqual([
+      "Off",
+      "Standard",
+      "Sensitive",
+    ]);
+    expect(rowValue(el, "Obstacle detection").textContent.trim()).toBe("Standard");
+
+    radio(el, "Obstacle detection", "Off").click();
+
+    expect(events.map((s) => s.obstacleDetection)).toEqual([1]);
+  });
+
+  it("shows each switch as Off / On and sends a boolean", async () => {
+    const { el, events } = await mount(extras);
+    expect(rowValue(el, "Auto-reverse direction").textContent.trim()).toBe("Off");
+    expect(rowValue(el, "Mow").textContent.trim()).toBe("On");
+
+    radio(el, "Auto-reverse direction", "On").click();
+    radio(el, "Mow", "Off").click();
+
+    expect(events.map((s) => [s.autoChangeDirection, s.cutGrass])).toEqual([
+      [true, true],
+      [false, false],
+    ]);
+  });
+
+  it("shows start progress and dumping frequency with units", async () => {
+    const { el, events } = await mount(extras);
+    expect(slider(el, "Start from").value()).toBe("20%");
+    expect(slider(el, "Dump every").value()).toBe("15 m²");
+
+    drag(slider(el, "Start from").input, "50");
+
+    expect(events.map((s) => s.startProgress)).toEqual([50]);
+  });
+
+  it("groups grass collection under its own heading and hides the frequency while not dumping", async () => {
+    const { el } = await mount({ ...extras, settings: { ...extras.settings, dumpGrass: false } });
+    expect(shadow(el).querySelector(".group")?.textContent).toBe("Grass collection");
+    expect(sliderLabels(el)).not.toContain("Dump every");
+  });
+
+  it("shows none of them on a mower without the entities", async () => {
+    const { el } = await mount();
+    expect(groupLabels(el)).not.toContain("Obstacle detection");
+    expect(groupLabels(el)).not.toContain("Mow");
+    expect(sliderLabels(el)).not.toContain("Start from");
+    expect(shadow(el).querySelector(".group")).toBeNull();
+  });
+});
+
+describe("<mow-planner-settings> locked settings", () => {
+  const locked = ["angleMode", "angle", "perimeterLaps", "mowOrder", "edgeDistance"] as const;
+
+  it("disables only the locked controls, which fire nothing", async () => {
+    const { el, events } = await mount({}, { locked });
+    expect(radios(group(el, "Path angle")).every((r) => r.disabled)).toBe(true);
+    expect(slider(el, "Angle").input.disabled).toBe(true);
+    expect(radios(group(el, "Perimeter laps")).every((r) => r.disabled)).toBe(true);
+    expect(radios(group(el, "Pattern")).some((r) => r.disabled)).toBe(false);
+    expect(slider(el, "Speed").input.disabled).toBe(false);
+
+    radio(el, "Perimeter laps", "3").click();
+    drag(slider(el, "Angle").input, "10");
+    radio(el, "Pattern", "Grid").click();
+
+    expect(events).toEqual([{ ...settings, pattern: "double_grid" }]);
+  });
+
+  it("opens More settings while settings are locked, where most changeable ones are", async () => {
+    const { el } = await mount({}, { locked });
+    expect(one(shadow(el), "details", HTMLDetailsElement).open).toBe(true);
+  });
+});

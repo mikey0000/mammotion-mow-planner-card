@@ -11,6 +11,8 @@ import {
   type MowSettings,
   type Range,
   type SettingLimits,
+  type SettingName,
+  type SwitchSetting,
 } from "../model";
 import { controlStyles } from "../styles";
 import "./control-segmented";
@@ -36,12 +38,23 @@ const dialTicks = svg`<g class="ticks">${[0, 90, 180, 270].map(
   (angle) => svg`<line y1=${-DIAL_RADIUS} y2=${4 - DIAL_RADIUS} transform="rotate(${angle})"></line>`,
 )}</g>`;
 
+const SWITCH_LABELS: Readonly<Record<SwitchSetting, StringKey>> = {
+  autoChangeDirection: "settings.auto_change_direction",
+  cutGrass: "settings.cut_grass",
+  dumpGrass: "settings.dump_grass",
+  cutEdges: "settings.cut_edges",
+};
+
+type Value<K extends SettingName> = NonNullable<MowSettings[K]>;
+
 /** Mowing settings form; fully controlled: fires `settings-changed` with a new settings object per change. */
 export class MowSettingsPanel extends LitElement {
   @property({ attribute: false }) settings!: MowSettings;
   @property({ attribute: false }) limits!: SettingLimits;
   @property({ attribute: false }) language?: string;
   @property({ attribute: false }) disabled = false;
+  /** Settings shown but not editable; while any are, More settings starts open. */
+  @property({ attribute: false }) locked: readonly SettingName[] = [];
 
   static override styles = [
     controlStyles,
@@ -91,6 +104,9 @@ export class MowSettingsPanel extends LitElement {
         stroke: var(--mmp-accent);
         stroke-width: 2.5;
       }
+      .dial.off .stripes {
+        stroke: var(--disabled-text-color, #9e9e9e);
+      }
       summary {
         display: flex;
         align-items: center;
@@ -111,8 +127,13 @@ export class MowSettingsPanel extends LitElement {
         transform: rotate(180deg);
       }
       details > .field,
-      details > mow-planner-slider {
+      details > mow-planner-slider,
+      details > .group {
         margin-block-start: var(--ha-space-3, 12px);
+      }
+      .group {
+        margin-block-end: 0;
+        font-weight: var(--ha-font-weight-medium, 500);
       }
     `,
   ];
@@ -120,8 +141,11 @@ export class MowSettingsPanel extends LitElement {
   protected override render() {
     const { settings: s, limits: l } = this;
     const perimeterOnly = s.pattern === "no_grid";
+    const switches = l.switches ?? [];
+    const collecting = switches.filter((name) => name !== "autoChangeDirection");
     return html`
       ${this.segmented(
+        "pattern",
         "settings.pattern",
         PATTERNS.filter((p) => l.patterns.includes(p)).map((p) => ({
           value: p,
@@ -129,82 +153,93 @@ export class MowSettingsPanel extends LitElement {
           icon: patternIcons[p],
         })),
         s.pattern,
-        (pattern) => ({ pattern }),
       )}
       ${perimeterOnly ? nothing : this.renderAngle()}
       ${
         s.pattern === "double_grid"
           ? this.slider(
+              "crossAngle",
               "settings.cross_angle",
               l.crossAngle,
               s.crossAngle,
               (v) => this.degrees(v),
-              (crossAngle) => ({
-                crossAngle,
-              }),
               90,
             )
           : nothing
       }
-      ${this.slider(
-        "settings.spacing",
-        l.spacingCm,
-        s.spacingCm,
-        (v) => this.unit("unit.cm", v),
-        (spacingCm) => ({
-          spacingCm,
-        }),
-      )}
-      ${this.segmented(
-        "settings.perimeter_laps",
-        this.laps(l.maxPerimeterLaps),
-        s.perimeterLaps,
-        (perimeterLaps) => ({
-          perimeterLaps,
-        }),
-      )}
-      ${this.segmented(
-        "settings.obstacle_laps",
-        this.laps(l.maxObstacleLaps),
-        s.obstacleLaps,
-        (obstacleLaps) => ({
-          obstacleLaps,
-        }),
-      )}
+      ${this.slider("spacingCm", "settings.spacing", l.spacingCm, s.spacingCm, (v) => this.unit("unit.cm", v))}
+      ${this.segmented("perimeterLaps", "settings.perimeter_laps", this.laps(l.maxPerimeterLaps), s.perimeterLaps)}
+      ${this.segmented("obstacleLaps", "settings.obstacle_laps", this.laps(l.maxObstacleLaps), s.obstacleLaps)}
       ${
         perimeterOnly
           ? nothing
           : this.segmented(
+              "mowOrder",
               "settings.mow_order",
               MOW_ORDERS.map((order) => ({ value: order, label: this.t(`mow_order.${order}`) })),
               s.mowOrder,
-              (mowOrder) => ({ mowOrder }),
             )
       }
-      <details>
+      <details ?open=${this.locked.length > 0}>
         <summary>
           ${this.t("settings.more")}
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${mdiIcon(mdiChevronDown)}</svg>
         </summary>
-        ${this.slider(
-          "settings.speed",
-          l.speed,
-          s.speed,
-          (v) => this.unit("unit.speed", v, 1),
-          (speed) => ({ speed }),
-        )}
+        ${this.slider("speed", "settings.speed", l.speed, s.speed, (v) => this.unit("unit.speed", v, 1))}
         ${
           l.bladeHeight
             ? this.slider(
+                "bladeHeight",
                 "settings.blade_height",
                 l.bladeHeight,
                 s.bladeHeight ?? l.bladeHeight.min,
                 (v) => this.unit("unit.mm", v),
-                (bladeHeight) => ({ bladeHeight }),
               )
             : nothing
         }
         ${l.edgeDistance ? this.renderEdge() : nothing}
+        ${
+          l.obstacleDetection && s.obstacleDetection !== undefined
+            ? this.segmented(
+                "obstacleDetection",
+                "settings.detection",
+                l.obstacleDetection.map(({ key, code }) => ({
+                  value: code,
+                  label: this.t(`detection.${key}`),
+                })),
+                s.obstacleDetection,
+              )
+            : nothing
+        }
+        ${switches.includes("autoChangeDirection") ? this.toggle("autoChangeDirection") : nothing}
+        ${
+          l.startProgress
+            ? this.slider(
+                "startProgress",
+                "settings.start_progress",
+                l.startProgress,
+                s.startProgress ?? 0,
+                (v) => this.unit("unit.percent", v),
+              )
+            : nothing
+        }
+        ${
+          collecting.length > 0 || l.dumpInterval
+            ? html`<p class="group">${this.t("settings.collection")}</p>
+                ${collecting.map((name) => this.toggle(name))}
+                ${
+                  l.dumpInterval && s.dumpGrass !== false
+                    ? this.slider(
+                        "dumpInterval",
+                        "settings.dump_interval",
+                        l.dumpInterval,
+                        s.dumpInterval ?? 0,
+                        (v) => this.unit("unit.m2", v),
+                      )
+                    : nothing
+                }`
+            : nothing
+        }
       </details>
     `;
   }
@@ -220,15 +255,19 @@ export class MowSettingsPanel extends LitElement {
       angleMode === "relative_angle"
         ? (v: number) => this.t("angle.offset", { value: this.number(v, 0, "exceptZero") })
         : (v: number) => this.degrees(v);
-    return html`${this.segmented("settings.angle", modes, angleMode, (mode) => ({ angleMode: mode }), [
+    return html`${this.segmented("angleMode", "settings.angle", modes, angleMode, [
       html`<p class="help secondary">${this.t(`angle_help.${angleMode}`)}</p>`,
     ])}
     ${
       angleMode === "random_angle"
         ? nothing
         : html`<div class="angle">
-            ${this.slider("settings.angle_value", this.limits.angle, angle, format, (value) => ({ angle: value }), 0)}
-            <svg class="dial" viewBox="-30 -30 60 60" aria-hidden="true">
+            ${this.slider("angle", "settings.angle_value", this.limits.angle, angle, format, 0)}
+            <svg
+              class="dial ${this.isLocked("angle") ? "off" : ""}"
+              viewBox="-30 -30 60 60"
+              aria-hidden="true"
+            >
               <circle r=${DIAL_RADIUS}></circle>
               ${
                 angleMode === "relative_angle"
@@ -247,18 +286,26 @@ export class MowSettingsPanel extends LitElement {
     const stored = this.settings.edgeDistance ?? 0;
     const nearest = EDGE_CHOICES.reduce((a, b) => (Math.abs(b - stored) < Math.abs(a - stored) ? b : a));
     return this.segmented(
+      "edgeDistance",
       "settings.edge",
       EDGE_CHOICES.map((value) => ({ value, label: this.t(value ? "edge.on" : "edge.inside") })),
       nearest,
-      (edgeDistance) => ({ edgeDistance }),
     );
   }
 
-  private segmented<T extends SegmentValue>(
+  private toggle(name: SwitchSetting) {
+    const options = [false, true].map((value) => ({
+      value,
+      label: this.t(value ? "toggle.on" : "toggle.off"),
+    }));
+    return this.segmented(name, SWITCH_LABELS[name], options, this.settings[name] ?? false);
+  }
+
+  private segmented<K extends SettingName>(
+    name: K,
     label: StringKey,
-    options: readonly SegmentOption<T>[],
-    value: T,
-    apply: (value: T) => Partial<MowSettings>,
+    options: readonly SegmentOption<Value<K> & SegmentValue>[],
+    value: Value<K> & SegmentValue,
     extra: unknown[] = [],
   ) {
     return html`<div class="field">
@@ -266,9 +313,9 @@ export class MowSettingsPanel extends LitElement {
         .label=${this.t(label)}
         .options=${options}
         .value=${value}
-        .disabled=${this.disabled}
-        @value-changed=${(event: CustomEvent<{ value: T }>) => {
-          this.emit(apply(event.detail.value));
+        .disabled=${this.isLocked(name)}
+        @value-changed=${(event: CustomEvent<{ value: Value<K> }>) => {
+          this.emit(name, event.detail.value);
         }}
       ></mow-planner-segmented>
       ${extra}
@@ -276,11 +323,11 @@ export class MowSettingsPanel extends LitElement {
   }
 
   private slider(
+    name: SettingName,
     label: StringKey,
     range: Range,
     value: number,
     format: (value: number) => string,
-    apply: (value: number) => Partial<MowSettings>,
     origin?: number,
   ) {
     return html`<mow-planner-slider
@@ -290,21 +337,25 @@ export class MowSettingsPanel extends LitElement {
       .origin=${origin}
       .format=${format}
       .language=${this.language}
-      .disabled=${this.disabled}
+      .disabled=${this.isLocked(name)}
       @value-changed=${(event: CustomEvent<{ value: number }>) => {
-        this.emit(apply(event.detail.value));
+        this.emit(name, event.detail.value);
       }}
     ></mow-planner-slider>`;
+  }
+
+  private isLocked(name: SettingName) {
+    return this.disabled || this.locked.includes(name);
   }
 
   private laps(max: number): SegmentOption<number>[] {
     return Array.from({ length: max + 1 }, (_, value) => ({ value, label: this.number(value) }));
   }
 
-  private emit(change: Partial<MowSettings>) {
+  private emit<K extends SettingName>(name: K, value: MowSettings[K]) {
     this.dispatchEvent(
       new CustomEvent("settings-changed", {
-        detail: { settings: { ...this.settings, ...change } },
+        detail: { settings: { ...this.settings, [name]: value } },
         bubbles: true,
         composed: true,
       }),

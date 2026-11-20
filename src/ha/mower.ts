@@ -3,9 +3,14 @@ import {
   ANGLE_MODES,
   MOW_ORDERS,
   PATTERNS,
+  SWITCH_SETTINGS,
+  type DetectionMode,
+  type DetectionOption,
   type MowSettings,
   type Range,
   type SettingLimits,
+  type SettingName,
+  type SwitchSetting,
 } from "../model";
 import type { EntityRegistryDisplayEntry, HassEntity, HomeAssistant } from "./types";
 
@@ -30,9 +35,9 @@ export interface Mower {
   readonly settings: MowSettings;
   /** The settings that came from an entity rather than a fallback. */
   readonly heldSettings: readonly SettingName[];
+  /** Present while a job is under way; lists what `modify_running_job` can change on it. */
+  readonly runningJob?: { readonly changeable: readonly SettingName[] };
 }
-
-export type SettingName = keyof MowSettings;
 
 const LAPS = ["none", "one", "two", "three", "four"] as const;
 
@@ -44,6 +49,64 @@ const OPTIONS = {
   obstacle_laps: LAPS,
   border_mode: MOW_ORDERS,
 } as const;
+
+/** pymammotion's `DetectionStrategy.for_device` lists as `bypass_mode` options, with each option's `ultra_wave` code. */
+const DETECTION_LISTS: readonly (readonly DetectionOption[])[] = (
+  [
+    [
+      ["off", 0],
+      ["slow_touch", 1],
+      ["less_touch", 2],
+    ],
+    [
+      ["off", 0],
+      ["slow_touch", 1],
+      ["less_touch", 2],
+      ["standard", 10],
+    ],
+    [
+      ["off", 1],
+      ["standard", 10],
+      ["sensitive", 11],
+    ],
+  ] satisfies (readonly [DetectionMode, number])[][]
+).map((list) => list.map(([key, code]) => ({ key, code })));
+
+const SWITCH_KEYS: Readonly<Record<SwitchSetting, string>> = {
+  autoChangeDirection: "auto_change_direction",
+  cutGrass: "is_mow",
+  dumpGrass: "is_dump",
+  cutEdges: "is_edge",
+};
+
+/** The integration's own defaults, shown while a switch has no value. */
+const SWITCH_DEFAULTS: Readonly<Record<SwitchSetting, boolean>> = {
+  autoChangeDirection: false,
+  cutGrass: true,
+  dumpGrass: true,
+  cutEdges: false,
+};
+
+const ACTIVE_STATES: readonly string[] = ["mowing", "paused", "returning"];
+
+/** What `mammotion.modify_running_job` takes, less auto-reverse: the integration resets that from the job before sending. */
+const RUNNING_JOB_SETTINGS: readonly SettingName[] = [
+  "pattern",
+  "spacingCm",
+  "obstacleLaps",
+  "speed",
+  "bladeHeight",
+  "obstacleDetection",
+  "startProgress",
+];
+
+type Lookup = (key: string) => HassEntity | undefined;
+
+interface Lookups {
+  readonly select: Lookup;
+  readonly number: Lookup;
+  readonly toggle: Lookup;
+}
 
 interface Sibling {
   readonly key: string | undefined;
@@ -124,6 +187,20 @@ function selected<T extends string>(entity: HassEntity | undefined, allowed: rea
   return allowed.find((option) => option === entity?.state);
 }
 
+function onOff(entity?: HassEntity): boolean | undefined {
+  return entity?.state === "on" ? true : entity?.state === "off" ? false : undefined;
+}
+
+/** Only an exact known list is trusted: "off" stands for 0 on some lists and 1 on others. */
+function detectionOptions(entity?: HassEntity): SettingLimits["obstacleDetection"] {
+  const options = available(entity)?.attributes.options;
+  return Array.isArray(options)
+    ? DETECTION_LISTS.find(
+        (list) => list.length === options.length && list.every((option, i) => option.key === options[i]),
+      )
+    : undefined;
+}
+
 function range(entity?: HassEntity): Range | undefined {
   const attributes = available(entity)?.attributes;
   const [min, max, step] = [attributes?.min, attributes?.max, attributes?.step].map(finite);
@@ -135,12 +212,16 @@ function maxLaps(entity?: HassEntity): number {
   return codes.length > 0 ? Math.max(...codes) : LAPS.length - 1;
 }
 
-function readLimits(select: (key: string) => HassEntity | undefined, number: typeof select): SettingLimits {
+function readLimits({ select, number, toggle }: Lookups): SettingLimits {
   const patterns = offered(select("channel_mode"), PATTERNS);
   const angleModes = offered(select("cutting_angle_mode"), ANGLE_MODES);
   const cross = range(number("toward_included_angle")) ?? { min: 1, max: 179, step: 1 };
   const bladeHeight = range(number("blade_height"));
   const edgeDistance = range(number("ride_boundary_distance"));
+  const obstacleDetection = detectionOptions(select("bypass_mode"));
+  const startProgress = range(number("start_progress"));
+  const dumpInterval = range(number("dumping_interval"));
+  const switches = SWITCH_SETTINGS.filter((name) => available(toggle(SWITCH_KEYS[name])));
   return {
     patterns: patterns.length > 0 ? patterns : PATTERNS,
     angleModes: angleModes.length > 0 ? angleModes : ["relative_angle", "absolute_angle"],
@@ -152,12 +233,15 @@ function readLimits(select: (key: string) => HassEntity | undefined, number: typ
     speed: range(number("working_speed")) ?? { min: 0.2, max: 0.6, step: 0.1 },
     ...(bladeHeight && { bladeHeight }),
     ...(edgeDistance && { edgeDistance }),
+    ...(obstacleDetection && { obstacleDetection }),
+    ...(startProgress && { startProgress }),
+    ...(dumpInterval && { dumpInterval }),
+    ...(switches.length > 0 && { switches }),
   };
 }
 
 function readSettings(
-  select: (key: string) => HassEntity | undefined,
-  number: typeof select,
+  { select, number, toggle }: Lookups,
   limits: SettingLimits,
 ): Pick<Mower, "settings" | "heldSettings"> {
   const held: Partial<MowSettings> = {};
@@ -183,7 +267,14 @@ function readSettings(
   hold("speed", value("working_speed", limits.speed));
   hold("bladeHeight", value("blade_height", limits.bladeHeight));
   hold("edgeDistance", value("ride_boundary_distance", limits.edgeDistance));
-  const { bladeHeight, edgeDistance } = limits;
+  const detection = select("bypass_mode")?.state;
+  hold("obstacleDetection", limits.obstacleDetection?.find((option) => option.key === detection)?.code);
+  hold("startProgress", value("start_progress", limits.startProgress));
+  hold("dumpInterval", value("dumping_interval", limits.dumpInterval));
+  const switches = limits.switches ?? [];
+  for (const name of switches) hold(name, onOff(toggle(SWITCH_KEYS[name])));
+  const { bladeHeight, edgeDistance, startProgress, dumpInterval } = limits;
+  const [detectionDefault] = limits.obstacleDetection ?? [];
   return {
     settings: {
       pattern: "single_grid",
@@ -197,6 +288,10 @@ function readSettings(
       speed: clamp(0.3, limits.speed),
       ...(bladeHeight && { bladeHeight: midpoint(bladeHeight) }),
       ...(edgeDistance && { edgeDistance: midpoint(edgeDistance) }),
+      ...(detectionDefault && { obstacleDetection: detectionDefault.code }),
+      ...(startProgress && { startProgress: clamp(0, startProgress) }),
+      ...(dumpInterval && { dumpInterval: clamp(10, dumpInterval) }),
+      ...Object.fromEntries(switches.map((name) => [name, SWITCH_DEFAULTS[name]])),
       ...held,
     },
     heldSettings: Object.keys(held) as SettingName[],
@@ -219,6 +314,14 @@ function readAreas(entities: readonly Sibling[], deviceLabel: string | undefined
       return [{ entityId: state.entity_id, hash, name, on: state.state === "on" }];
     })
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function readRunningJob(state: string, progress?: HassEntity, angleMode?: HassEntity): Mower["runningJob"] {
+  // The integration's own test, the breakpoint lying in the job's areas short of 100 %, reads values no entity has.
+  if (!ACTIVE_STATES.includes(state) || stateNumber(progress) === 100) return undefined;
+  // Random angle is missing only on the original Luba, whose running job the integration refuses to change.
+  const changeable = offered(angleMode, ANGLE_MODES).includes("random_angle") ? RUNNING_JOB_SETTINGS : [];
+  return { changeable };
 }
 
 function readPosition(tracker?: HassEntity): Mower["position"] {
@@ -245,9 +348,17 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
   const entities = siblings(hass, entityId);
   const find = (domain: string, key: string): HassEntity | undefined =>
     entities.find((e) => e.key === key && e.state.entity_id.startsWith(`${domain}.`))?.state;
-  const select = (key: string): HassEntity | undefined => find("select", key);
-  const number = (key: string): HassEntity | undefined => find("number", key);
-  const limits = readLimits(select, number);
+  const lookups: Lookups = {
+    select: (key) => find("select", key),
+    number: (key) => find("number", key),
+    toggle: (key) => find("switch", key),
+  };
+  const limits = readLimits(lookups);
+  const runningJob = readRunningJob(
+    mower.state,
+    find("sensor", "progress"),
+    lookups.select("cutting_angle_mode"),
+  );
   const position = readPosition(find("device_tracker", "device_tracker"));
   const battery = stateNumber(
     entities.find(
@@ -262,7 +373,8 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
     ...(position && { position }),
     ...(battery !== undefined && { battery }),
     limits,
-    ...readSettings(select, number, limits),
+    ...readSettings(lookups, limits),
+    ...(runningJob && { runningJob }),
   };
 }
 
@@ -278,7 +390,22 @@ const SERVICE_FIELDS: { readonly [K in SettingName]: (value: NonNullable<MowSett
   speed: (value) => ({ speed: Math.round(value * 10) / 10 }),
   bladeHeight: (value) => ({ blade_height: Math.round(value) }),
   edgeDistance: (value) => ({ ride_boundary_distance: value }),
+  obstacleDetection: (value) => ({ ultra_wave: value }),
+  startProgress: (value) => ({ start_progress: Math.round(value) }),
+  autoChangeDirection: (value) => ({ auto_change_direction: value ? 1 : 0 }),
+  cutGrass: (value) => ({ is_mow: value }),
+  dumpGrass: (value) => ({ is_dump: value }),
+  cutEdges: (value) => ({ is_edge: value }),
+  dumpInterval: (value) => ({ collect_grass_frequency: Math.round(value) }),
 };
+
+function serviceFields(settings: MowSettings, names: readonly SettingName[]): Record<string, unknown> {
+  const field = (name: SettingName): object => {
+    const value = settings[name];
+    return value === undefined ? {} : (SERVICE_FIELDS[name] as (value: unknown) => object)(value);
+  };
+  return Object.assign({}, ...names.map(field)) as Record<string, unknown>;
+}
 
 /**
  * `mammotion.start_mow` service data for a new job over `areaEntityIds`, in mowing order.
@@ -290,15 +417,16 @@ export function startMowData(
   areaEntityIds: readonly string[],
   planOnly = false,
 ): Record<string, unknown> {
-  const field = (name: SettingName): object => {
-    const value = settings[name];
-    return value === undefined ? {} : (SERVICE_FIELDS[name] as (value: unknown) => object)(value);
+  return {
+    areas: [...areaEntityIds],
+    ...serviceFields(settings, names),
+    ...(planOnly && { plan_only: true }),
   };
-  return Object.assign(
-    { areas: [...areaEntityIds] },
-    ...names.map(field),
-    planOnly ? { plan_only: true } : {},
-  ) as Record<string, unknown>;
+}
+
+/** `mammotion.modify_running_job` service data; the job keeps its own value for every setting left out. */
+export function modifyJobData(settings: MowSettings, names: readonly SettingName[]): Record<string, unknown> {
+  return serviceFields(settings, names);
 }
 
 async function fetchFeatures(
@@ -334,6 +462,14 @@ export function fetchPlannedRoute(
 /** Asks the mower to upload the route it last planned, so `fetchPlannedRoute` can return it. */
 export async function requestPlannedRoute(hass: HomeAssistant, entityId: string): Promise<void> {
   await hass.callService("mammotion", "fetch_mow_path", {}, { entity_id: entityId }, false, false);
+}
+
+export async function modifyRunningJob(
+  hass: HomeAssistant,
+  entityId: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await hass.callService("mammotion", "modify_running_job", data, { entity_id: entityId }, true, false);
 }
 
 export async function startMow(

@@ -2,6 +2,8 @@ import type { Feature, FeatureCollection, Position } from "geojson";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MowPlannerCard } from "../src/card";
 import type { MowMap } from "../src/components/map-view";
+import type { SegmentedControl } from "../src/components/control-segmented";
+import type { SliderControl } from "../src/components/control-slider";
 import type { MowSettingsPanel } from "../src/components/settings-panel";
 import { CARD_TYPE, configForm, normalizeConfig } from "../src/config";
 import type { MowSettings } from "../src/model";
@@ -82,6 +84,13 @@ const LUBA_SETTINGS: MowSettings = {
   speed: 0.4,
   bladeHeight: 55,
   edgeDistance: 0.5,
+  obstacleDetection: 10,
+  startProgress: 0,
+  dumpInterval: 20,
+  autoChangeDirection: true,
+  cutGrass: true,
+  dumpGrass: false,
+  cutEdges: true,
 };
 const LUBA_FIELDS = {
   channel_mode: 1,
@@ -95,9 +104,20 @@ const LUBA_FIELDS = {
   speed: 0.4,
   blade_height: 55,
   ride_boundary_distance: 0.5,
+  ultra_wave: 10,
+  start_progress: 0,
+  collect_grass_frequency: 20,
+  auto_change_direction: 1,
+  is_mow: true,
+  is_dump: false,
+  is_edge: true,
 };
 const without = (fields: Record<string, unknown>, name: string) =>
   Object.fromEntries(Object.entries(fields).filter(([key]) => key !== name));
+
+/** Active, but the job has reached 100 %, so there is nothing left to change. */
+const homeward = () =>
+  withChanges(lubaEntities(), { [LUBA]: { state: "returning" }, "sensor.luba_progress": { state: "100" } });
 
 const FRONT = "switch.luba_area_front";
 const BACK = "switch.luba_back_lawn";
@@ -662,7 +682,14 @@ describe("review step", () => {
       Speed: "0.4 m/s",
       "Cutting height": "55 mm",
       "Edge coverage": "On edge",
+      "Obstacle detection": "Standard",
+      "Start from": "0%",
+      "Auto-reverse direction": "On",
+      Mow: "On",
+      "Dump grass": "Off",
+      "Cut edges": "On",
     });
+    expect(rows(card)).not.toHaveProperty("Dump every");
     expect(rows(card)["Path length"]).toMatch(/^\d+(\.\d)? km$/);
     expect(rows(card)["Estimated time"]).toMatch(/^about (\d+ h )?\d+ min$/);
     expect(textOf(root(card).querySelector(".totals"))).toMatch(/^2 areas · \d+ m² · about/);
@@ -720,8 +747,8 @@ describe("review step", () => {
     expect(focused(card)).toBe("Start mowing");
   });
 
-  it("warns that a busy mower will end its current job", async () => {
-    const card = await mount(lubaHass(withMap, withChanges(lubaEntities(), { [LUBA]: { state: "mowing" } })));
+  it("warns that a mower heading home from a finished job will end it", async () => {
+    const card = await mount(lubaHass(withMap, homeward()));
     await toReview(card);
 
     expect(statuses(card)).toContain("Luba is busy. Starting will end its current job");
@@ -851,7 +878,7 @@ describe("confirming a start", () => {
   });
 
   it("warns inside the confirmation that a busy mower will end its current job", async () => {
-    const card = await mount(lubaHass(withMap, withChanges(lubaEntities(), { [LUBA]: { state: "paused" } })));
+    const card = await mount(lubaHass(withMap, homeward()));
     await toReview(card);
 
     await openConfirm(card);
@@ -859,15 +886,20 @@ describe("confirming a start", () => {
     expect(textOf(confirmation(card))).toContain("Luba is busy. Starting will end its current job");
   });
 
-  it("warns inside an open confirmation when the mower starts a job meanwhile", async () => {
+  it("closes itself, sending nothing, when the mower starts a job meanwhile", async () => {
     const hass = lubaHass();
     const card = await mount(hass);
     await toReview(card);
     await openConfirm(card);
+    await arm(card);
+    const confirm = button(card, "Start now");
 
     await update(card, nextHass(hass, { [LUBA]: "mowing" }));
+    await forceClick(card, confirm);
 
-    expect(textOf(confirmation(card))).toContain("Luba is busy. Starting will end its current job");
+    expect(confirmation(card)).toBeNull();
+    expect(callsTo(hass, "start_mow")).toEqual([]);
+    expect(hasButton(card, "Apply changes")).toBe(true);
   });
 
   it("closes itself and shows the alert when the mower becomes unavailable", async () => {
@@ -1173,6 +1205,235 @@ describe("after a start", () => {
 
     expect(callsTo(hass, "start_mow")).toEqual([]);
     expect(new Set(hass.calls.map((call) => call.service))).toEqual(new Set(["get_geojson"]));
+  });
+});
+
+describe("during a running job", () => {
+  const mowing = (changes: Parameters<typeof withChanges>[1] = {}) =>
+    lubaHass(withMap, withChanges(lubaEntities(), { [LUBA]: { state: "mowing" }, ...changes }));
+
+  /** The settings controls by label, telling which are disabled. */
+  const controls = (card: MowPlannerCard): Record<string, boolean> =>
+    Object.fromEntries(
+      [
+        ...(panel(card).shadowRoot?.querySelectorAll<SegmentedControl | SliderControl>(
+          "mow-planner-segmented, mow-planner-slider",
+        ) ?? []),
+      ].map((control) => [control.label, control.disabled]),
+    );
+
+  const notes = (card: MowPlannerCard) => [...root(card).querySelectorAll('[role="note"]')].map(textOf);
+
+  async function toSettings(card: MowPlannerCard): Promise<void> {
+    await click(card, button(card, "2Pattern"));
+  }
+
+  async function apply(card: MowPlannerCard): Promise<void> {
+    await click(card, button(card, "Apply changes"));
+    await armAndConfirm(card, "Apply now");
+  }
+
+  it("locks the areas and the map", async () => {
+    const card = await mount(mowing());
+
+    expect(textOf(root(card).querySelector(".hint"))).toBe("Areas can't change during a job");
+    expect(chips(card).every((c) => c.disabled)).toBe(true);
+    expect(mapEl(card).readonly).toBe(true);
+    await toggleOnMap(card, 222);
+    expect(pressed(card)).toEqual(["1Area Front"]);
+    expect(button(card, "Next").disabled).toBe(false);
+  });
+
+  it("enables only what the running job can change, with one hint", async () => {
+    const card = await mount(mowing());
+    await toSettings(card);
+
+    expect(notes(card)).toEqual(["Luba is on a job. Greyed-out settings can't change until it ends"]);
+    expect(controls(card)).toEqual({
+      Pattern: false,
+      "Path angle": true,
+      Angle: true,
+      "Crossing angle": true,
+      "Path spacing": false,
+      "Perimeter laps": true,
+      "No-go zone laps": false,
+      "Mow first": true,
+      Speed: false,
+      "Cutting height": false,
+      "Edge coverage": true,
+      "Obstacle detection": false,
+      "Auto-reverse direction": true,
+      "Start from": false,
+      Mow: true,
+      "Dump grass": true,
+      "Cut edges": true,
+    });
+  });
+
+  it("shows the values the integration holds", async () => {
+    const card = await mount(mowing());
+    await toSettings(card);
+
+    expect(panel(card).settings).toEqual(LUBA_SETTINGS);
+  });
+
+  it("locks every setting on a mower that cannot change a running job", async () => {
+    const hass = mowing({
+      "select.luba_cutting_angle_mode": {
+        state: "relative_angle",
+        attributes: { options: ["relative_angle", "absolute_angle"] },
+      },
+    });
+    const card = await mount(hass);
+    await toSettings(card);
+
+    expect(notes(card)).toEqual(["Luba can't change a running job. Settings are shown for reference"]);
+    expect(Object.values(controls(card)).every(Boolean)).toBe(true);
+
+    await editSettings(card, { speed: 0.5 });
+    await click(card, button(card, "Next"));
+    expect(button(card, "Apply changes").disabled).toBe(true);
+    await forceClick(card, button(card, "Apply changes"));
+    expect(confirmation(card)).toBeNull();
+  });
+
+  it("offers Apply changes instead of Start, once something changeable is edited", async () => {
+    const card = await mount(mowing());
+    await click(card, button(card, "3Review"));
+
+    expect(hasButton(card, "Start mowing")).toBe(false);
+    expect(button(card, "Apply changes").disabled).toBe(true);
+    expect(textOf(root(card).querySelector(".totals"))).toBe("No changes yet");
+    expect(statuses(card)).toEqual([]);
+
+    await toSettings(card);
+    await editSettings(card, { speed: 0.5, bladeHeight: 40 });
+    await click(card, button(card, "Next"));
+
+    expect(button(card, "Apply changes").disabled).toBe(false);
+    expect(textOf(root(card).querySelector(".totals"))).toBe("2 changes");
+  });
+
+  it("ignores edits to settings the job cannot change", async () => {
+    const card = await mount(mowing());
+    await toSettings(card);
+
+    await editSettings(card, { angle: 10, perimeterLaps: 0 });
+
+    expect(panel(card).settings).toEqual(LUBA_SETTINGS);
+  });
+
+  it("asks for confirmation, then sends only the edited settings to the running job", async () => {
+    const hass = mowing();
+    const card = await mount(hass);
+    await toSettings(card);
+    await editSettings(card, { speed: 0.5, obstacleDetection: 11, startProgress: 30 });
+    await click(card, button(card, "Next"));
+
+    await click(card, button(card, "Apply changes"));
+    expect(textOf(confirmation(card))).toMatch(
+      /^Change Speed, Obstacle detection, Start from on Luba's current job\?/,
+    );
+    expect(callsTo(hass, "modify_running_job")).toEqual([]);
+    await armAndConfirm(card, "Apply now");
+
+    expect(callsTo(hass, "modify_running_job")).toEqual([
+      {
+        domain: "mammotion",
+        service: "modify_running_job",
+        data: { speed: 0.5, ultra_wave: 11, start_progress: 30 },
+        target: { entity_id: LUBA },
+        notifyOnError: true,
+        returnResponse: false,
+      },
+    ]);
+    expect(callsTo(hass, "start_mow")).toEqual([]);
+    expect(statuses(card)).toContain("Changes sent to Luba");
+    expect(button(card, "Apply changes").disabled).toBe(true);
+
+    await toSettings(card);
+    await editSettings(card, { speed: 0.6 });
+    await click(card, button(card, "Next"));
+    expect(button(card, "Apply changes").disabled).toBe(false);
+  });
+
+  it("reports a failed change and lets the user retry", async () => {
+    let refuse = true;
+    const card = await mount(
+      lubaHass(
+        (service, call) => {
+          if (service === "modify_running_job" && refuse) throw new Error("no_running_job");
+          return withMap(service, call);
+        },
+        withChanges(lubaEntities(), { [LUBA]: { state: "mowing" } }),
+      ),
+    );
+    await toSettings(card);
+    await editSettings(card, { speed: 0.5 });
+    await click(card, button(card, "Next"));
+
+    await apply(card);
+    expect(alerts(card)).toEqual(["Couldn't change the running job"]);
+
+    refuse = false;
+    await apply(card);
+    expect(statuses(card)).toContain("Changes sent to Luba");
+  });
+
+  it("drops edits made before the job started", async () => {
+    const hass = lubaHass();
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { speed: 0.5 });
+
+    await update(card, nextHass(hass, { [LUBA]: "mowing" }));
+
+    expect(panel(card).settings.speed).toBe(0.4);
+    await click(card, button(card, "Next"));
+    expect(button(card, "Apply changes").disabled).toBe(true);
+  });
+
+  it("closes the confirmation, sending nothing, when the job ends meanwhile", async () => {
+    const hass = mowing();
+    const card = await mount(hass);
+    await toSettings(card);
+    await editSettings(card, { speed: 0.5 });
+    await click(card, button(card, "Next"));
+    await click(card, button(card, "Apply changes"));
+    await arm(card);
+    const confirm = button(card, "Apply now");
+
+    await update(card, nextHass(hass, { [LUBA]: "docked" }));
+    await forceClick(card, confirm);
+
+    expect(confirmation(card)).toBeNull();
+    expect(callsTo(hass, "modify_running_job")).toEqual([]);
+    expect(hasButton(card, "Start mowing")).toBe(true);
+  });
+
+  it("disables everything while the change is in flight and sends it once", async () => {
+    const applied = deferred();
+    const hass = lubaHass(
+      (service, call) => (service === "modify_running_job" ? applied.promise : withMap(service, call)),
+      withChanges(lubaEntities(), { [LUBA]: { state: "mowing" } }),
+    );
+    const card = await mount(hass);
+    await toSettings(card);
+    await editSettings(card, { speed: 0.5 });
+    await click(card, button(card, "Next"));
+    await click(card, button(card, "Apply changes"));
+    await arm(card);
+    const confirm = button(card, "Apply now");
+    await click(card, confirm);
+
+    expect(button(card, "Applying…").disabled).toBe(true);
+    expect(stepButtons(card).every((step) => step.disabled)).toBe(true);
+    await forceClick(card, confirm);
+    await forceClick(card, button(card, "Applying…"));
+    applied.resolve(undefined);
+    await settle(card);
+
+    expect(callsTo(hass, "modify_running_job")).toHaveLength(1);
   });
 });
 

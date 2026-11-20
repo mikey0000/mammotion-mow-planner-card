@@ -47,6 +47,20 @@ export type AngleMode = (typeof ANGLE_MODES)[number];
 export const MOW_ORDERS = ["border_first", "grid_first"] as const;
 export type MowOrder = (typeof MOW_ORDERS)[number];
 
+/** Label keys of the integration's `bypass_mode` select. */
+export const DETECTION_MODES = ["off", "slow_touch", "less_touch", "standard", "sensitive"] as const;
+export type DetectionMode = (typeof DETECTION_MODES)[number];
+
+/** One obstacle-detection choice: its label key and the `ultra_wave` code it stands for on this mower. */
+export interface DetectionOption {
+  readonly key: DetectionMode;
+  readonly code: number;
+}
+
+/** On/off settings, each backed by its own switch entity. */
+export const SWITCH_SETTINGS = ["autoChangeDirection", "cutGrass", "dumpGrass", "cutEdges"] as const;
+export type SwitchSetting = (typeof SWITCH_SETTINGS)[number];
+
 export interface MowSettings {
   readonly pattern: Pattern;
   readonly angleMode: AngleMode;
@@ -64,7 +78,20 @@ export interface MowSettings {
   readonly bladeHeight?: number;
   /** Ride-boundary distance; absent on models without the option. */
   readonly edgeDistance?: number;
+  /** `ultra_wave` code of the obstacle detection mode. */
+  readonly obstacleDetection?: number;
+  /** Percent of the job to skip, resuming from there. */
+  readonly startProgress?: number;
+  readonly autoChangeDirection?: boolean;
+  /** Grass collection: mow while collecting, dump at the dump point, cut along the edges. */
+  readonly cutGrass?: boolean;
+  readonly dumpGrass?: boolean;
+  readonly cutEdges?: boolean;
+  /** m² mowed between dumps. */
+  readonly dumpInterval?: number;
 }
+
+export type SettingName = keyof MowSettings;
 
 export interface Range {
   readonly min: number;
@@ -84,6 +111,11 @@ export interface SettingLimits {
   readonly speed: Range;
   readonly bladeHeight?: Range;
   readonly edgeDistance?: Range;
+  readonly obstacleDetection?: readonly DetectionOption[];
+  readonly startProgress?: Range;
+  readonly dumpInterval?: Range;
+  /** The on/off settings the mower has, when any. */
+  readonly switches?: readonly SwitchSetting[];
 }
 
 export interface Stripe {

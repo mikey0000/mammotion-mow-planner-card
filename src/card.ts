@@ -1,6 +1,7 @@
 import {
   mdiAlertOutline,
   mdiBattery,
+  mdiCheck,
   mdiCheckCircleOutline,
   mdiMapMarkerOffOutline,
   mdiPlay,
@@ -20,6 +21,8 @@ import {
   fetchMap,
   fetchPlannedRoute,
   findMowers,
+  modifyJobData,
+  modifyRunningJob,
   mowerName,
   readMower,
   requestPlannedRoute,
@@ -27,11 +30,10 @@ import {
   startMowData,
   type AreaSwitch,
   type Mower,
-  type SettingName,
 } from "./ha/mower";
 import type { HomeAssistant } from "./ha/types";
 import { isRtl, localize, type StringKey } from "./localize";
-import type { AreaPreview, MapModel, Marker, MowSettings, Point } from "./model";
+import type { AreaPreview, MapModel, Marker, MowSettings, Point, SettingName } from "./model";
 import { controlStyles } from "./styles";
 
 const STEPS = ["areas", "settings", "review"] as const;
@@ -40,12 +42,15 @@ type Step = (typeof STEPS)[number];
 type MapState =
   { readonly status: "loading" | "empty" | "error" } | { readonly status: "ready"; readonly model: MapModel };
 
+/** `start` a new job, plan a `route` without mowing, or `modify` the running job. */
+type PlanKind = "start" | "route" | "modify";
+
 /** What the user was shown when asked to confirm; exactly this is sent. */
 interface Plan {
   readonly mower: Mower;
   readonly data: Record<string, unknown>;
   readonly summary: string;
-  readonly planOnly: boolean;
+  readonly kind: PlanKind;
 }
 
 type Request =
@@ -65,6 +70,33 @@ const ROUTE_POLL_MS = 2000;
 const ROUTE_POLLS = 10;
 /** Keeps a double tap on Start from also confirming it. */
 const CONFIRM_ARM_MS = 600;
+
+const PLAN_LABELS: Readonly<Record<PlanKind, { readonly title: StringKey; readonly confirm: StringKey }>> = {
+  start: { title: "action.start", confirm: "action.confirm_start" },
+  route: { title: "preview.exact_route", confirm: "action.confirm_route" },
+  modify: { title: "action.apply", confirm: "action.confirm_apply" },
+};
+
+const SETTING_LABELS: Readonly<Record<SettingName, StringKey>> = {
+  pattern: "settings.pattern",
+  angleMode: "settings.angle",
+  angle: "settings.angle_value",
+  crossAngle: "settings.cross_angle",
+  spacingCm: "settings.spacing",
+  perimeterLaps: "settings.perimeter_laps",
+  obstacleLaps: "settings.obstacle_laps",
+  mowOrder: "settings.mow_order",
+  speed: "settings.speed",
+  bladeHeight: "settings.blade_height",
+  edgeDistance: "settings.edge",
+  obstacleDetection: "settings.detection",
+  startProgress: "settings.start_progress",
+  autoChangeDirection: "settings.auto_change_direction",
+  cutGrass: "settings.cut_grass",
+  dumpGrass: "settings.dump_grass",
+  cutEdges: "settings.cut_edges",
+  dumpInterval: "settings.dump_interval",
+};
 
 /** The switches name unnamed areas differently from the map; the switches are what the user knows. */
 function withSwitchNames(model: MapModel, switches: readonly AreaSwitch[]): MapModel {
@@ -100,6 +132,7 @@ export class MowPlannerCard extends LitElement {
   private armTimer?: ReturnType<typeof setTimeout>;
   private latestMapLoad = 0;
   private hadFocus = false;
+  private jobMode = false;
   private readonly loadedMaps = new Map<string, MapState>();
 
   setConfig(config: unknown): void {
@@ -168,9 +201,29 @@ export class MowPlannerCard extends LitElement {
     return ACTIVE_STATES.includes(this.mower?.state ?? "");
   }
 
-  /** Planning a route drops a paused job, so a busy mower is never asked for one. */
-  private refuses(planOnly: boolean): boolean {
-    return Boolean(this.blocker) || (planOnly && this.active);
+  private get job(): Mower["runningJob"] {
+    return this.mower?.runningJob;
+  }
+
+  /** The edited settings the running job can take. */
+  private get jobEdits(): SettingName[] {
+    return (this.job?.changeable ?? []).filter((name) => name in this.edits);
+  }
+
+  private get lockedSettings(): readonly SettingName[] {
+    const { job, settings } = this;
+    if (!job || !settings) return [];
+    return (Object.keys(settings) as SettingName[]).filter((name) => !job.changeable.includes(name));
+  }
+
+  /**
+   * A running job is changed, never replaced, from the card; planning a route drops a paused job,
+   * so a busy mower is never asked for one.
+   */
+  private refuses(kind: PlanKind): boolean {
+    if (this.blocker) return true;
+    if (kind === "modify") return !this.job || this.jobEdits.length === 0;
+    return Boolean(this.job) || (kind === "route" && this.active);
   }
 
   private get pathLengthM(): number {
@@ -180,6 +233,7 @@ export class MowPlannerCard extends LitElement {
   private get blocker(): StringKey | undefined {
     const { mower, settings } = this;
     if (!mower || OFFLINE_STATES.includes(mower.state)) return "warn.unavailable";
+    if (mower.runningJob) return undefined;
     if (this.selectedAreas.length === 0) return "warn.no_area";
     if (settings?.pattern !== "no_grid") return undefined;
     const nothingToMow = this.map.status === "ready" && this.pathLengthM === 0;
@@ -197,9 +251,13 @@ export class MowPlannerCard extends LitElement {
   protected override willUpdate(changed: PropertyValues): void {
     this.hadFocus = this.matches(":focus-within");
     if (changed.has("mowerId")) this.resetPlan();
+    const jobMode = Boolean(this.job);
+    if (jobMode !== this.jobMode) {
+      this.jobMode = jobMode;
+      this.edits = {};
+    }
     this.refreshPreviews();
-    if (this.request.status === "confirming" && this.refuses(this.request.plan.planOnly))
-      this.cancelConfirm();
+    if (this.request.status === "confirming" && this.refuses(this.request.plan.kind)) this.cancelConfirm();
   }
 
   protected override updated(changed: PropertyValues): void {
@@ -266,14 +324,14 @@ export class MowPlannerCard extends LitElement {
   }
 
   private toggleArea(hash: number): void {
-    if (this.busy || !this.mower?.areas.some((area) => area.hash === hash)) return;
+    if (this.busy || this.job || !this.mower?.areas.some((area) => area.hash === hash)) return;
     const hashes = this.selectedAreas.map((area) => area.hash);
     this.pickedHashes = hashes.includes(hash) ? hashes.filter((h) => h !== hash) : [...hashes, hash];
     this.forgetOutcome();
   }
 
   private toggleAll(): void {
-    if (this.busy) return;
+    if (this.busy || this.job) return;
     const all = (this.mower?.areas ?? []).map((area) => area.hash);
     const picked = this.selectedAreas.map((area) => area.hash);
     this.pickedHashes =
@@ -283,9 +341,11 @@ export class MowPlannerCard extends LitElement {
 
   /** Records only the fields that changed, so the rest keep following the mower. */
   private editSettings(settings: MowSettings): void {
-    const shown = this.settings;
+    const { settings: shown, lockedSettings: locked } = this;
     if (this.busy || !shown) return;
-    const changed = Object.entries(settings).filter(([name, value]) => value !== shown[name as SettingName]);
+    const changed = Object.entries(settings).filter(
+      ([name, value]) => value !== shown[name as SettingName] && !locked.includes(name as SettingName),
+    );
     this.edits = { ...this.edits, ...Object.fromEntries(changed) };
     this.forgetOutcome();
   }
@@ -306,16 +366,24 @@ export class MowPlannerCard extends LitElement {
     return [...new Set([...(this.mower?.heldSettings ?? []), ...(Object.keys(this.edits) as SettingName[])])];
   }
 
-  private askToConfirm(planOnly: boolean): void {
-    const { mower, settings } = this;
-    if (!mower || !settings || this.busy || this.refuses(planOnly)) return;
+  private askToConfirm(kind: PlanKind): void {
+    const { mower, settings, jobEdits } = this;
+    if (!mower || !settings || this.busy || this.refuses(kind)) return;
     const areas = this.selectedAreas.map((area) => area.entityId);
-    const plan: Plan = {
-      mower,
-      planOnly,
-      data: startMowData(settings, this.sentSettings, areas, planOnly),
-      summary: this.totals.join(" · "),
-    };
+    const plan: Plan =
+      kind === "modify"
+        ? {
+            mower,
+            kind,
+            data: modifyJobData(settings, jobEdits),
+            summary: jobEdits.map((name) => this.t(SETTING_LABELS[name])).join(", "),
+          }
+        : {
+            mower,
+            kind,
+            data: startMowData(settings, this.sentSettings, areas, kind === "route"),
+            summary: this.totals.join(" · "),
+          };
     this.request = { status: "confirming", plan, armed: false };
     clearTimeout(this.armTimer);
     this.armTimer = setTimeout(() => {
@@ -332,15 +400,15 @@ export class MowPlannerCard extends LitElement {
     const { latestHass: hass, request } = this;
     if (!hass || request.status !== "confirming" || !request.armed) return;
     const { plan } = request;
-    if (this.refuses(plan.planOnly)) return;
+    if (this.refuses(plan.kind)) return;
     this.request = { status: "sending", plan };
     let sent = true;
     try {
-      await startMow(hass, plan.mower.entityId, plan.data);
+      await (plan.kind === "modify" ? modifyRunningJob : startMow)(hass, plan.mower.entityId, plan.data);
     } catch {
       sent = false;
     }
-    if (plan.planOnly) {
+    if (plan.kind === "route") {
       this.request = IDLE;
       if (sent) await this.loadRoute(hass, plan.mower.entityId);
       else this.route = { status: "unavailable" };
@@ -411,6 +479,13 @@ export class MowPlannerCard extends LitElement {
     return hours > 0
       ? this.t("summary.duration_hours", { hours, minutes })
       : this.t("summary.duration", { minutes });
+  }
+
+  /** How many settings the running job would change. */
+  private get jobTotals(): string[] {
+    const count = this.jobEdits.length;
+    if (count === 0) return [this.t("job.no_changes")];
+    return [count === 1 ? this.t("job.change_one") : this.t("job.changes", { count })];
   }
 
   /** Area count, size and time of the plan, as short phrases. */
@@ -546,7 +621,7 @@ export class MowPlannerCard extends LitElement {
           .route=${this.route.status === "ready" ? this.route.lines : undefined}
           .strings=${this.mapStrings}
           .note=${approximate ? this.t("preview.approximate") : undefined}
-          ?readonly=${this.step === "review" || this.busy}
+          ?readonly=${this.step === "review" || this.busy || Boolean(this.job)}
           @area-toggle=${(event: CustomEvent<{ hash: number }>) => {
             this.toggleArea(event.detail.hash);
           }}
@@ -583,27 +658,38 @@ export class MowPlannerCard extends LitElement {
   private renderStep(mower: Mower): TemplateResult {
     if (this.step === "areas") return this.renderAreas(mower);
     if (this.step === "review") return this.renderReview(mower);
-    return html`<mow-planner-settings
-      .settings=${this.settings}
-      .limits=${mower.limits}
-      .language=${this.language}
-      .disabled=${this.busy}
-      @settings-changed=${(event: CustomEvent<{ settings: MowSettings }>) => {
-        this.editSettings(event.detail.settings);
-      }}
-    ></mow-planner-settings>`;
+    const { job } = this;
+    return html`${
+        job
+          ? html`<p class="secondary hint" role="note">
+              ${this.t(job.changeable.length > 0 ? "job.locked" : "job.unsupported", { name: mower.name })}
+            </p>`
+          : nothing
+      }
+      <mow-planner-settings
+        .settings=${this.settings}
+        .limits=${mower.limits}
+        .language=${this.language}
+        .disabled=${this.busy}
+        .locked=${this.lockedSettings}
+        @settings-changed=${(event: CustomEvent<{ settings: MowSettings }>) => {
+          this.editSettings(event.detail.settings);
+        }}
+      ></mow-planner-settings>`;
   }
 
   private renderAreas(mower: Mower): TemplateResult {
     if (mower.areas.length === 0) return html`<p class="secondary">${this.t("areas.none_available")}</p>`;
     const selected = this.selectedAreas;
+    const locked = this.busy || Boolean(this.job);
+    const hint = this.job ? "areas.locked" : this.map.status === "ready" ? "areas.hint" : "areas.hint_list";
     return html`
-      <p class="secondary hint">${this.t(this.map.status === "ready" ? "areas.hint" : "areas.hint_list")}</p>
+      <p class="secondary hint">${this.t(hint)}</p>
       <div class="chips">
         <button
           class="chip"
           aria-pressed=${selected.length === mower.areas.length}
-          ?disabled=${this.busy}
+          ?disabled=${locked}
           @click=${() => {
             this.toggleAll();
           }}
@@ -616,7 +702,7 @@ export class MowPlannerCard extends LitElement {
             <button
               class="chip"
               aria-pressed=${order > 0}
-              ?disabled=${this.busy}
+              ?disabled=${locked}
               @click=${() => {
                 this.toggleArea(area.hash);
               }}
@@ -634,6 +720,11 @@ export class MowPlannerCard extends LitElement {
     if (!settings) return html``;
     const striped = settings.pattern !== "no_grid";
     const degrees = (value: number) => this.t("unit.degrees", { value: this.num(value) });
+    const detection = mower.limits.obstacleDetection?.find(
+      (option) => option.code === settings.obstacleDetection,
+    );
+    const onOff = (name: SettingName) =>
+      [this.t(SETTING_LABELS[name]), this.t(settings[name] ? "toggle.on" : "toggle.off")] as const;
     const angle =
       settings.angleMode === "random_angle"
         ? this.t("angle_mode.random_angle")
@@ -656,6 +747,17 @@ export class MowPlannerCard extends LitElement {
         this.t("settings.edge"),
         this.t(settings.edgeDistance < 0.25 ? "edge.inside" : "edge.on"),
       ],
+      detection && [this.t("settings.detection"), this.t(`detection.${detection.key}`)],
+      settings.startProgress !== undefined && [
+        this.t("settings.start_progress"),
+        this.t("unit.percent", { value: this.num(settings.startProgress) }),
+      ],
+      ...(mower.limits.switches ?? []).map(onOff),
+      settings.dumpInterval !== undefined &&
+        settings.dumpGrass !== false && [
+          this.t("settings.dump_interval"),
+          this.t("unit.m2", { value: this.num(settings.dumpInterval) }),
+        ],
       this.pathLengthM > 0 && [
         this.t("review.distance"),
         this.t("summary.distance", { km: this.num(this.pathLengthM / 1000, 1) }),
@@ -685,7 +787,7 @@ export class MowPlannerCard extends LitElement {
               class="text-button"
               ?disabled=${this.busy}
               @click=${() => {
-                this.askToConfirm(true);
+                this.askToConfirm("route");
               }}
             >
               ${this.t(this.route.status === "loading" ? "preview.exact_route_loading" : "preview.exact_route")}
@@ -710,24 +812,27 @@ export class MowPlannerCard extends LitElement {
   }
 
   private renderConfirm({ plan, armed }: Extract<Request, { status: "confirming" }>): TemplateResult {
-    const { mower, planOnly } = plan;
+    const { mower, kind, summary } = plan;
+    const { name } = mower;
     return html`
       <footer
         class="confirm"
         role="alertdialog"
-        aria-label=${this.t(planOnly ? "preview.exact_route" : "action.start")}
+        aria-label=${this.t(PLAN_LABELS[kind].title)}
         @keydown=${(event: KeyboardEvent) => {
           if (event.key === "Escape") this.cancelConfirm();
         }}
       >
         <p>
           ${
-            planOnly
-              ? this.t("route.confirm", { name: mower.name })
-              : this.t("start.confirm", { name: mower.name, areas: plan.summary })
+            kind === "route"
+              ? this.t("route.confirm", { name })
+              : kind === "modify"
+                ? this.t("modify.confirm", { name, changes: summary })
+                : this.t("start.confirm", { name, areas: summary })
           }
         </p>
-        ${!planOnly && this.active ? this.renderAlert("warning", "warn.active_job", mower) : nothing}
+        ${kind === "start" && this.active ? this.renderAlert("warning", "warn.active_job", mower) : nothing}
         <div class="actions">
           <button
             class="text-button"
@@ -739,7 +844,7 @@ export class MowPlannerCard extends LitElement {
             ${this.t("action.cancel")}
           </button>
           <button class="primary" ?disabled=${!armed} @click=${() => void this.sendConfirmed()}>
-            ${this.t(planOnly ? "action.confirm_route" : "action.confirm_start")}
+            ${this.t(PLAN_LABELS[kind].confirm)}
           </button>
         </div>
       </footer>
@@ -754,13 +859,22 @@ export class MowPlannerCard extends LitElement {
     const next = STEPS[STEPS.indexOf(step) + 1];
     const back = STEPS[STEPS.indexOf(step) - 1];
     const blocked = blocker && (step !== "areas" || blocker === "warn.unavailable");
+    const modified = outcome && request.plan.kind === "modify";
     return html`
       <footer>
-        ${outcome && request.status === "sent" ? this.renderAlert("success", "start.sent", mower) : nothing}
-        ${outcome && request.status === "failed" ? this.renderAlert("error", "start.failed", mower) : nothing}
+        ${
+          outcome && request.status === "sent"
+            ? this.renderAlert("success", modified ? "modify.sent" : "start.sent", mower)
+            : nothing
+        }
+        ${
+          outcome && request.status === "failed"
+            ? this.renderAlert("error", modified ? "modify.failed" : "start.failed", mower)
+            : nothing
+        }
         ${blocked ? this.renderAlert("error", blocker, mower) : nothing}
         ${
-          step === "review" && !blocker && request.status === "idle" && this.active
+          step === "review" && !blocker && request.status === "idle" && this.active && !this.job
             ? this.renderAlert("warning", "warn.active_job", mower)
             : nothing
         }
@@ -769,7 +883,9 @@ export class MowPlannerCard extends LitElement {
             ${
               step === "areas" && blocker === "warn.no_area"
                 ? this.t("warn.no_area")
-                : this.totals.map((phrase, index) => html`${index ? " · " : nothing}<bdi>${phrase}</bdi>`)
+                : (this.job ? this.jobTotals : this.totals).map(
+                    (phrase, index) => html`${index ? " · " : nothing}<bdi>${phrase}</bdi>`,
+                  )
             }
           </span>
           ${
@@ -790,14 +906,18 @@ export class MowPlannerCard extends LitElement {
               ? html`<button
                   class="primary"
                   data-focus
-                  ?disabled=${step === "areas" ? this.selectedAreas.length === 0 : blocker === "warn.no_path"}
+                  ?disabled=${
+                    step === "areas"
+                      ? !this.job && this.selectedAreas.length === 0
+                      : blocker === "warn.no_path"
+                  }
                   @click=${() => {
                     this.goTo(next);
                   }}
                 >
                   ${this.t("action.next")}
                 </button>`
-              : outcome && request.status === "sent"
+              : outcome && request.status === "sent" && !modified
                 ? html`<button
                     class="primary"
                     data-focus
@@ -807,17 +927,34 @@ export class MowPlannerCard extends LitElement {
                   >
                     ${this.t("action.new_plan")}
                   </button>`
-                : html`<button
-                    class="primary"
-                    data-focus
-                    ?disabled=${Boolean(blocker) || this.busy}
-                    @click=${() => {
-                      this.askToConfirm(false);
-                    }}
-                  >
-                    ${this.renderIcon(mdiPlay)}
-                    ${this.t(request.status === "sending" ? "action.starting" : "action.start")}
-                  </button>`
+                : this.job
+                  ? html`<button
+                      class="primary"
+                      data-focus
+                      ?disabled=${
+                        Boolean(blocker) ||
+                        this.busy ||
+                        request.status === "sent" ||
+                        this.jobEdits.length === 0
+                      }
+                      @click=${() => {
+                        this.askToConfirm("modify");
+                      }}
+                    >
+                      ${this.renderIcon(mdiCheck)}
+                      ${this.t(request.status === "sending" ? "action.applying" : "action.apply")}
+                    </button>`
+                  : html`<button
+                      class="primary"
+                      data-focus
+                      ?disabled=${Boolean(blocker) || this.busy}
+                      @click=${() => {
+                        this.askToConfirm("start");
+                      }}
+                    >
+                      ${this.renderIcon(mdiPlay)}
+                      ${this.t(request.status === "sending" ? "action.starting" : "action.start")}
+                    </button>`
           }
         </div>
       </footer>
