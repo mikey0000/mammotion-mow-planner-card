@@ -117,6 +117,13 @@ interface DemoMower {
   readonly spacing: readonly [min: number, max: number, value: number];
   readonly bladeHeight?: readonly [number, number, number];
   readonly angleModes: readonly string[];
+  /** `bypass_mode` options, as the integration lists them for the model and firmware. */
+  readonly detection: readonly string[];
+  readonly switches: Readonly<Record<string, boolean>>;
+  /** Grass collector models only. */
+  readonly dumpInterval?: number;
+  /** Job progress in percent. */
+  readonly progress: number;
   readonly features: Feature[];
 }
 
@@ -131,6 +138,9 @@ const MOWERS: readonly DemoMower[] = [
     spacing: [20, 35, 25],
     bladeHeight: [25, 70, 45],
     angleModes: ["relative_angle", "absolute_angle", "random_angle"],
+    detection: ["off", "standard", "sensitive"],
+    switches: {},
+    progress: 0,
     features: GARDEN,
   },
   {
@@ -141,8 +151,26 @@ const MOWERS: readonly DemoMower[] = [
     battery: 54,
     position: [3, 2],
     spacing: [8, 14, 10],
-    angleModes: ["relative_angle", "absolute_angle"],
+    angleModes: ["relative_angle", "absolute_angle", "random_angle"],
+    detection: ["off", "standard", "sensitive"],
+    switches: { auto_change_direction: false },
+    progress: 42,
     features: PADDOCK,
+  },
+  {
+    slug: "yuka",
+    name: "Yuka",
+    model: "Yuka 1500",
+    state: "docked",
+    battery: 100,
+    position: [-21, -14.4],
+    spacing: [20, 35, 25],
+    angleModes: ["relative_angle", "absolute_angle", "random_angle"],
+    detection: ["off", "slow_touch", "less_touch", "standard"],
+    switches: { is_mow: true, is_dump: true, is_edge: false },
+    dumpInterval: 20,
+    progress: 0,
+    features: GARDEN,
   },
 ];
 
@@ -185,6 +213,15 @@ function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntr
     select("mowing_laps", "one", LAPS),
     select("obstacle_laps", "one", LAPS),
     select("border_mode", "border_first", ["border_first", "grid_first"]),
+    select("bypass_mode", "standard", mower.detection),
+    number("start_progress", 0, 0, 99, 1),
+    ...(mower.dumpInterval === undefined ? [] : [number("dumping_interval", mower.dumpInterval, 5, 100, 1)]),
+    ...Object.entries(mower.switches).map(([key, on]) =>
+      entity(`switch.${mower.slug}_${key}`, key, on ? "on" : "off", {
+        friendly_name: `${mower.name} ${key}`,
+      }),
+    ),
+    entity(`sensor.${mower.slug}_progress`, "progress", String(mower.progress), { unit_of_measurement: "%" }),
     number("cutting_angle", 0, -180, 180, 1),
     number("toward_included_angle", 90, -180, 180, 1),
     number("path_spacing", mower.spacing[2], mower.spacing[0], mower.spacing[1], 1),
