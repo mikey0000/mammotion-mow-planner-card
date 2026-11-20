@@ -413,7 +413,7 @@ describe("readMower switches", () => {
   });
 });
 
-describe("readMower running job", () => {
+describe("readMower running job without the integration's running-job attributes", () => {
   const CHANGEABLE = [
     "pattern",
     "spacingCm",
@@ -424,9 +424,12 @@ describe("readMower running job", () => {
     "startProgress",
   ];
 
-  it.each(["mowing", "paused", "returning"])("lists what can change on a %s job", (state) => {
-    expect(readLuba({ "lawn_mower.luba": { state } })?.runningJob).toEqual({ changeable: CHANGEABLE });
-  });
+  it.each(["mowing", "paused", "returning"])(
+    "lists what can change on a %s job, less auto-reverse",
+    (state) => {
+      expect(readLuba({ "lawn_mower.luba": { state } })?.runningJob).toEqual({ changeable: CHANGEABLE });
+    },
+  );
 
   it.each(["docked", "idle", "error", "unavailable"])("has no running job while %s", (state) => {
     expect(readLuba({ "lawn_mower.luba": { state } })).not.toHaveProperty("runningJob");
@@ -466,6 +469,119 @@ describe("readMower running job", () => {
     });
 
     expect(mower?.runningJob).toEqual({ changeable: [] });
+  });
+});
+
+describe("readMower running job from the integration's attributes", () => {
+  const JOB = {
+    areas: [222, 111, 999],
+    toward: 135,
+    toward_mode: 2,
+    toward_included_angle: 45,
+    mowing_laps: 1,
+    ride_boundary_distance: 0,
+    job_mode: 4,
+    job_id: 7,
+    job_version: 1,
+    speed: 0.3,
+    channel_width: 22,
+    ultra_wave: 11,
+    channel_mode: 3,
+    blade_height: 40,
+    auto_change_direction: 0,
+    border_mode: 0,
+    obstacle_laps: 0,
+    start_progress: 35,
+  };
+
+  const reported = (state: string, running_job: unknown, running_job_modifiable: boolean) =>
+    readLuba({
+      "lawn_mower.luba": {
+        state,
+        attributes: { friendly_name: "Luba", running_job, running_job_modifiable },
+      },
+    });
+
+  it("lets every job setting change, auto-reverse included, and reports the job's areas", () => {
+    expect(reported("mowing", JOB, true)?.runningJob).toEqual({
+      changeable: [
+        "pattern",
+        "spacingCm",
+        "obstacleLaps",
+        "speed",
+        "bladeHeight",
+        "obstacleDetection",
+        "startProgress",
+        "autoChangeDirection",
+      ],
+      areas: [222, 111, 999],
+    });
+  });
+
+  it("shows the running job's own values instead of the planning entities'", () => {
+    const mower = reported("mowing", JOB, true);
+
+    expect(mower?.settings).toEqual({
+      pattern: "no_grid",
+      angleMode: "random_angle",
+      angle: -45,
+      crossAngle: 45,
+      spacingCm: 22,
+      perimeterLaps: 1,
+      obstacleLaps: 0,
+      mowOrder: "border_first",
+      speed: 0.3,
+      bladeHeight: 40,
+      edgeDistance: 0,
+      obstacleDetection: 11,
+      startProgress: 35,
+      autoChangeDirection: false,
+      cutGrass: true,
+      dumpGrass: false,
+      cutEdges: true,
+      dumpInterval: 20,
+    });
+  });
+
+  it("keeps the planning value for a field the job leaves out, leaves unset or the mower does not offer", () => {
+    const mower = reported(
+      "mowing",
+      {
+        areas: [111],
+        speed: 0,
+        channel_width: 0,
+        blade_height: 0,
+        ultra_wave: 2,
+        channel_mode: 9,
+        toward_mode: 2.5,
+      },
+      true,
+    );
+
+    expect(mower?.settings).toMatchObject({
+      pattern: "double_grid",
+      angleMode: "absolute_angle",
+      speed: 0.4,
+      spacingCm: 28,
+      bladeHeight: 55,
+      obstacleDetection: 10,
+      autoChangeDirection: true,
+      startProgress: 0,
+    });
+  });
+
+  it("locks everything on a running job the integration cannot change", () => {
+    expect(reported("mowing", JOB, false)?.runningJob?.changeable).toEqual([]);
+  });
+
+  it("trusts the integration over the state and the angle modes", () => {
+    expect(reported("mowing", null, false)).not.toHaveProperty("runningJob");
+    expect(reported("mowing", null, false)?.settings.speed).toBe(0.4);
+    expect(reported("docked", JOB, true)?.runningJob?.changeable).toContain("speed");
+  });
+
+  it("reports no areas when the job lists none", () => {
+    expect(reported("mowing", { ...JOB, areas: undefined }, true)?.runningJob).not.toHaveProperty("areas");
   });
 });
 

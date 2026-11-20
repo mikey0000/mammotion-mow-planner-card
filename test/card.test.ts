@@ -1437,6 +1437,86 @@ describe("during a running job", () => {
   });
 });
 
+describe("during a running job the integration reports", () => {
+  const JOB = {
+    areas: [222],
+    speed: 0.3,
+    channel_width: 22,
+    ultra_wave: 1,
+    auto_change_direction: 0,
+    toward: 15,
+  };
+
+  const reporting = (running_job: unknown = JOB, running_job_modifiable = true) =>
+    lubaHass(
+      withMap,
+      withChanges(lubaEntities(), {
+        [LUBA]: {
+          state: "mowing",
+          attributes: { friendly_name: "Luba", running_job, running_job_modifiable },
+        },
+      }),
+    );
+
+  const disabled = (card: MowPlannerCard, label: string) =>
+    [
+      ...(panel(card).shadowRoot?.querySelectorAll<SegmentedControl | SliderControl>(
+        "mow-planner-segmented, mow-planner-slider",
+      ) ?? []),
+    ].find((control) => control.label === label)?.disabled;
+
+  it("selects the job's own areas", async () => {
+    const card = await mount(reporting());
+
+    expect(pressed(card)).toEqual(["1Back lawn"]);
+  });
+
+  it("shows the job's values and lets auto-reverse change", async () => {
+    const hass = reporting();
+    const card = await mount(hass);
+    await click(card, button(card, "2Pattern"));
+
+    expect(panel(card).settings).toMatchObject({
+      speed: 0.3,
+      spacingCm: 22,
+      obstacleDetection: 1,
+      autoChangeDirection: false,
+      angle: 15,
+      bladeHeight: 55,
+    });
+    expect(disabled(card, "Auto-reverse direction")).toBe(false);
+    expect(disabled(card, "Angle")).toBe(true);
+
+    await editSettings(card, { autoChangeDirection: true, speed: 0.3 });
+    await click(card, button(card, "Next"));
+    await click(card, button(card, "Apply changes"));
+    await armAndConfirm(card, "Apply now");
+
+    expect(callsTo(hass, "modify_running_job").map((call) => call.data)).toEqual([
+      { auto_change_direction: 1 },
+    ]);
+  });
+
+  it("locks everything with the hint when the integration says the job cannot change", async () => {
+    const card = await mount(reporting(JOB, false));
+    await click(card, button(card, "2Pattern"));
+
+    expect(textOf(root(card).querySelector('[role="note"]'))).toBe(
+      "Luba can't change a running job. Settings are shown for reference",
+    );
+    expect(disabled(card, "Speed")).toBe(true);
+    expect(disabled(card, "Auto-reverse direction")).toBe(true);
+  });
+
+  it("plans a new job when the integration reports none, despite a mowing state", async () => {
+    const card = await mount(reporting(null, false));
+    await toReview(card);
+
+    expect(hasButton(card, "Start mowing")).toBe(true);
+    expect(statuses(card)).toContain("Luba is busy. Starting will end its current job");
+  });
+});
+
 describe("mower picker", () => {
   it("lists every mower as the heading", async () => {
     const card = await mount(twoMowers());

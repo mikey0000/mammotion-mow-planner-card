@@ -189,8 +189,9 @@ export class MowPlannerCard extends LitElement {
 
   private get selectedAreas(): readonly AreaSwitch[] {
     const areas = this.mower?.areas ?? [];
-    if (!this.pickedHashes) return areas.filter((area) => area.on);
-    return this.pickedHashes.flatMap((hash) => areas.find((area) => area.hash === hash) ?? []);
+    const hashes = this.job?.areas ?? this.pickedHashes;
+    if (!hashes) return areas.filter((area) => area.on);
+    return hashes.flatMap((hash) => areas.find((area) => area.hash === hash) ?? []);
   }
 
   private get busy(): boolean {
