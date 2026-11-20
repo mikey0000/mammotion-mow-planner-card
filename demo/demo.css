@@ -1,0 +1,78 @@
+:root {
+  --primary-color: #03a9f4;
+  --primary-text-color: #212121;
+  --secondary-text-color: #727272;
+  --disabled-text-color: #bdbdbd;
+  --text-primary-color: #fff;
+  --divider-color: rgba(0, 0, 0, 0.12);
+  --card-background-color: #fff;
+  --primary-background-color: #fafafa;
+  --error-color: #db4437;
+  --warning-color: #ffa600;
+  --success-color: #43a047;
+}
+:root.dark {
+  --primary-text-color: #e1e1e1;
+  --secondary-text-color: #9b9b9b;
+  --disabled-text-color: #6f6f6f;
+  --divider-color: rgba(225, 225, 225, 0.12);
+  --card-background-color: #1c1c1c;
+  --primary-background-color: #111;
+  color-scheme: dark;
+}
+body {
+  margin: 0;
+  background: var(--primary-background-color);
+  color: var(--primary-text-color);
+  font-family: Roboto, Noto, sans-serif;
+  font-size: 14px;
+}
+main {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 8px;
+}
+#dashboard {
+  display: grid;
+  gap: 8px;
+}
+ha-card {
+  display: block;
+  background: var(--card-background-color);
+  border: 1px solid var(--divider-color);
+  border-radius: 12px;
+}
+.tile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+}
+.tile i {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary-color) 20%, transparent);
+}
+.tile b {
+  display: block;
+  font-weight: 500;
+}
+.tile span {
+  font-size: 12px;
+  color: var(--secondary-text-color);
+}
+#log {
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--secondary-text-color);
+}
+#log h2 {
+  font-size: 12px;
+  font-weight: 500;
+}
+#log li {
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

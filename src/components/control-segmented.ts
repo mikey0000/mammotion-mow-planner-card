@@ -1,0 +1,139 @@
+import { css, html, LitElement, type SVGTemplateResult } from "lit";
+import { customElement, property } from "lit/decorators.js";
+import { controlStyles } from "../styles";
+
+export type SegmentValue = string | number;
+
+export interface SegmentOption<T extends SegmentValue = SegmentValue> {
+  readonly value: T;
+  readonly label: string;
+  readonly icon?: SVGTemplateResult;
+}
+
+const steps: Readonly<Record<string, number>> = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+
+/** Single-choice control; fires `value-changed` with `{ value }` and leaves `value` to the owner. */
+@customElement("mmp-segmented")
+export class SegmentedControl extends LitElement {
+  @property() label = "";
+  @property({ attribute: false }) options: readonly SegmentOption[] = [];
+  @property({ attribute: false }) value?: SegmentValue;
+  @property({ type: Boolean }) disabled = false;
+
+  static override styles = [
+    controlStyles,
+    css`
+      :host {
+        display: block;
+        container-type: inline-size;
+      }
+      .group {
+        display: grid;
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(0, 1fr);
+        gap: var(--ha-space-1, 4px);
+        padding: var(--ha-space-1, 4px);
+        border-radius: var(--mmp-radius);
+        background: var(--mmp-surface);
+      }
+      button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--ha-space-1, 4px);
+        min-width: 0;
+        height: calc(var(--mmp-control-height) - 8px);
+        padding-inline: var(--ha-space-2, 8px);
+        border-radius: calc(var(--mmp-radius) - 4px);
+        font-weight: var(--ha-font-weight-medium, 500);
+        transition: background-color 120ms;
+      }
+      button[aria-checked="true"] {
+        background: var(--mmp-tint);
+        color: var(--mmp-accent);
+      }
+      button[aria-checked="true"]:disabled {
+        background: var(--mmp-surface);
+        color: var(--disabled-text-color, #9e9e9e);
+      }
+      .text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .icon {
+        width: 20px;
+        height: 20px;
+      }
+      @container (max-width: 360px) {
+        .icon + .text {
+          display: none;
+        }
+      }
+    `,
+  ];
+
+  protected override render() {
+    return html`<div
+      class="group"
+      role="radiogroup"
+      aria-label=${this.label}
+      @keydown=${(event: KeyboardEvent) => {
+        this.onKeydown(event);
+      }}
+    >
+      ${this.options.map(
+        (option) =>
+          html`<button
+            role="radio"
+            aria-checked=${option.value === this.value ? "true" : "false"}
+            aria-label=${option.label}
+            title=${option.label}
+            tabindex=${option.value === this.value ? 0 : -1}
+            ?disabled=${this.disabled}
+            @click=${() => {
+              this.select(option);
+            }}
+          >
+            ${option.icon && html`<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${option.icon}</svg>`}
+            <span class="text">${option.label}</span>
+          </button>`,
+      )}
+    </div>`;
+  }
+
+  private select(option: SegmentOption) {
+    if (this.disabled || option.value === this.value) return;
+    this.dispatchEvent(new CustomEvent("value-changed", { detail: { value: option.value } }));
+  }
+
+  private onKeydown(event: KeyboardEvent) {
+    const index = this.targetIndex(event.key);
+    const option = index === undefined ? undefined : this.options[index];
+    if (index === undefined || !option) return;
+    event.preventDefault();
+    this.select(option);
+    this.renderRoot.querySelectorAll("button")[index]?.focus();
+  }
+
+  private targetIndex(key: string): number | undefined {
+    const count = this.options.length;
+    if (key === "Home") return 0;
+    if (key === "End") return count - 1;
+    const step = steps[key];
+    if (!step) return undefined;
+    const horizontal = key === "ArrowLeft" || key === "ArrowRight";
+    const flip = horizontal && getComputedStyle(this).direction === "rtl" ? -1 : 1;
+    const current = Math.max(
+      0,
+      this.options.findIndex((option) => option.value === this.value),
+    );
+    return (current + step * flip + count) % count;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "mmp-segmented": SegmentedControl;
+  }
+}

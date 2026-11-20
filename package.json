@@ -1,0 +1,36 @@
+{
+  "name": "mammotion-mow-planner-card",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Home Assistant Lovelace card to plan, preview and start a Mammotion mow from an interactive map.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "demo": "node build.mjs --serve",
+    "typecheck": "tsc",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build"
+  },
+  "dependencies": {
+    "@panzoom/panzoom": "^4.6.2",
+    "clipper2-ts": "^2.0.1-19",
+    "lit": "^3.3.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@mdi/js": "^7.4.47",
+    "@types/geojson": "^7946.0.16",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.15.0",
+    "eslint-plugin-lit": "^2.3.1",
+    "happy-dom": "^21.0.4",
+    "prettier": "^3.10.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^5.1.1"
+  }
+}
