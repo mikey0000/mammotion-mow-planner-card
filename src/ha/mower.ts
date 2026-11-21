@@ -20,6 +20,8 @@ export interface AreaSwitch {
   readonly hash: number;
   readonly name: string;
   readonly on: boolean;
+  /** 1-based place in the integration's mowing order while on. */
+  readonly order?: number;
 }
 
 export interface RunningJob {
@@ -50,6 +52,8 @@ export interface Mower {
    * running job is listed: its setters touch the mower only during a job, which the card can then tell.
    */
   readonly settingEntities?: Partial<Record<SettingName, string>>;
+  /** The areas the integration has picked, in mowing order; present when its area switches keep an order. */
+  readonly savedAreas?: readonly number[];
 }
 
 /** An entity service call that stores a setting in its planning entity. */
@@ -349,7 +353,16 @@ function readAreas(entities: readonly Sibling[], deviceLabel: string | undefined
         return [];
       const fullName = friendlyName(state) ?? state.entity_id;
       const name = prefix && fullName.startsWith(prefix) ? fullName.slice(prefix.length) : fullName;
-      return [{ entityId: state.entity_id, hash, name, on: state.state === "on" }];
+      const order = finite(state.attributes.order);
+      return [
+        {
+          entityId: state.entity_id,
+          hash,
+          name,
+          on: state.state === "on",
+          ...(order !== undefined && { order }),
+        },
+      ];
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -472,11 +485,20 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
       (e) => e.state.entity_id.startsWith("sensor.") && e.state.attributes.device_class === "battery",
     )?.state,
   );
+  const areas = readAreas(entities, deviceName(hass, entityId));
+  const ordered =
+    reported &&
+    areas.length > 0 &&
+    areas.every((area) => "order" in (hass.states[area.entityId]?.attributes ?? {}));
+  const savedAreas = areas
+    .filter((area) => area.on && area.order !== undefined)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((area) => area.hash);
   return {
     entityId,
     name: mowerName(hass, entityId),
     state: mower.state,
-    areas: readAreas(entities, deviceName(hass, entityId)),
+    areas,
     ...(position && { position }),
     ...(battery !== undefined && { battery }),
     limits,
@@ -484,6 +506,7 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
     heldSettings,
     ...(runningJob && { runningJob }),
     ...(Object.keys(settingEntities).length > 0 && { settingEntities }),
+    ...(ordered && { savedAreas }),
   };
 }
 
@@ -551,6 +574,24 @@ export function settingWrite(mower: Mower, name: SettingName, value: unknown): S
   }
   const option = optionOf(name, value, mower.limits);
   return option === undefined ? undefined : { entityId, domain, service: "select_option", data: { option } };
+}
+
+/**
+ * The switch calls that turn the saved areas into `target`, in order. The integration only appends a switch
+ * turned on, so the longest start of `target` already in order stays and every other area is turned off,
+ * then the rest of `target` is turned on one by one.
+ */
+export function areaWrites(mower: Mower, target: readonly number[]): SettingWrite[] {
+  const current = mower.savedAreas ?? [];
+  const kept = current.reduce((count, hash) => (hash === target[count] ? count + 1 : count), 0);
+  const steps = [
+    ...current.filter((hash) => !target.slice(0, kept).includes(hash)).map((hash) => [hash, false] as const),
+    ...target.slice(kept).map((hash) => [hash, true] as const),
+  ];
+  return steps.flatMap(([hash, on]) => {
+    const entityId = mower.areas.find((area) => area.hash === hash)?.entityId;
+    return entityId ? [{ entityId, domain: "switch", service: on ? "turn_on" : "turn_off", data: {} }] : [];
+  });
 }
 
 export async function writeSetting(

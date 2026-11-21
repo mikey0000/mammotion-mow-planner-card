@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { FeatureCollection } from "geojson";
 import {
+  areaWrites,
   fetchMap,
   canPlanRoute,
   findMowers,
@@ -1061,5 +1062,103 @@ describe("writeSetting", () => {
         returnResponse: false,
       },
     ]);
+  });
+});
+
+describe("saved areas", () => {
+  const IDLE = { friendly_name: "Luba", running_job: null, running_job_modifiable: false };
+  const ordered = (front: number | null, back: number | null, mower: Record<string, unknown> = IDLE) =>
+    readLuba({
+      "lawn_mower.luba": { attributes: mower },
+      "switch.luba_area_front": {
+        state: front ? "on" : "off",
+        attributes: { friendly_name: "Luba Area Front", hash: 111, order: front },
+      },
+      "switch.luba_back_lawn": {
+        state: back ? "on" : "off",
+        attributes: { friendly_name: "Luba Back lawn", hash: 222, order: back },
+      },
+    });
+
+  it("lists the switched-on areas in the integration's mowing order", () => {
+    expect(ordered(2, 1)?.savedAreas).toEqual([222, 111]);
+    expect(ordered(1, null)?.savedAreas).toEqual([111]);
+    expect(ordered(null, null)?.savedAreas).toEqual([]);
+  });
+
+  it("has no saved areas when the switches keep no order or the running job is not reported", () => {
+    expect(readLuba()).not.toHaveProperty("savedAreas");
+    expect(ordered(1, 2, { friendly_name: "Luba" })).not.toHaveProperty("savedAreas");
+  });
+});
+
+describe("areaWrites", () => {
+  const A = 111;
+  const B = 222;
+  const C = 333;
+  const mower = readLuba();
+  if (!mower) throw new Error("no mower");
+  const withC = {
+    ...mower,
+    areas: [...mower.areas, { entityId: "switch.luba_c", hash: C, name: "C", on: false }],
+  };
+  const names: Record<string, number> = {
+    "switch.luba_area_front": A,
+    "switch.luba_back_lawn": B,
+    "switch.luba_c": C,
+  };
+
+  it.each([
+    [[A], [A, B], [["on", B]]],
+    [[A, B], [A], [["off", B]]],
+    [
+      [A, B],
+      [B, A],
+      [
+        ["off", A],
+        ["on", A],
+      ],
+    ],
+    [
+      [A, B, C],
+      [B, A],
+      [
+        ["off", A],
+        ["off", C],
+        ["on", A],
+      ],
+    ],
+    [
+      [A, B, C],
+      [A, C, B],
+      [
+        ["off", B],
+        ["on", B],
+      ],
+    ],
+    [
+      [],
+      [B, A],
+      [
+        ["on", B],
+        ["on", A],
+      ],
+    ],
+    [
+      [A, B],
+      [],
+      [
+        ["off", A],
+        ["off", B],
+      ],
+    ],
+    [[A, B], [A, B], []],
+  ])("turns %j into %j with the fewest switch calls, in order", (current, target, steps) => {
+    const writes = areaWrites({ ...withC, savedAreas: current }, target);
+
+    expect(
+      writes.map((write) => [write.service === "turn_on" ? "on" : "off", names[write.entityId]]),
+    ).toEqual(steps);
+    expect(writes.every((write) => write.domain === "switch")).toBe(true);
   });
 });
