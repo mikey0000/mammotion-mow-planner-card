@@ -321,14 +321,21 @@ export interface DemoOptions {
   /** `empty` simulates a mower that has no map yet; `error` a failing integration. */
   readonly map?: "ready" | "empty" | "error";
   readonly singleMower?: boolean;
+  /** Stands for an integration from before `mammotion.plan_route`. */
+  readonly legacy?: boolean;
 }
+
+/** The frontend rejects a failed call with the server's translated error object, not an `Error`. */
+const serviceError = (code: string, message: string): Promise<never> =>
+  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- mirrors Home Assistant's websocket error
+  Promise.reject({ code, message });
 
 /** A `hass` whose services are recorded, never executed. */
 export function demoHass(options: DemoOptions): HomeAssistant {
   const mowers = options.singleMower ? MOWERS.slice(0, 1) : MOWERS;
   const pairs = mowers.flatMap(mowerEntities);
   const language = options.language ?? "en";
-  const planned = new Set<DemoMower>();
+  const ACTIVE = ["mowing", "paused", "returning"];
   return {
     states: Object.fromEntries(pairs.map(([state]) => [state.entity_id, state])),
     entities: Object.fromEntries(pairs.map(([, entry]) => [entry.entity_id, entry])),
@@ -342,13 +349,28 @@ export function demoHass(options: DemoOptions): HomeAssistant {
     locale: { language },
     themes: { darkMode: options.darkMode ?? false },
     translationMetadata: { translations: { he: { isRTL: true }, ar: { isRTL: true } } },
+    services: {
+      mammotion: Object.fromEntries(
+        ["get_geojson", "start_mow", "modify_running_job", ...(options.legacy ? [] : ["plan_route"])].map(
+          (name) => [name, {}],
+        ),
+      ),
+    },
     callService: (async (domain, service, data = {}, target) => {
       options.onCall({ domain, service, data, target });
       await new Promise((resolve) => setTimeout(resolve, 350));
       const mower = mowers.find((candidate) => target?.entity_id === `lawn_mower.${candidate.slug}`);
-      if (service === "start_mow" && data.plan_only === true && mower) planned.add(mower);
-      if (service === "get_mow_path_geojson")
-        return { response: mower && planned.has(mower) ? plannedRoute(mower) : {} };
+      if (service === "plan_route" && mower) {
+        if (ACTIVE.includes(mower.state)) {
+          return serviceError("service_validation_error", `${mower.name} must be idle to plan a route.`);
+        }
+        if (!mower.optimal) {
+          return serviceError("home_assistant_error", `${mower.name} did not share the route it planned.`);
+        }
+        return {
+          response: { ...plannedRoute(mower), plan: { path_hash: "4242", toward: 0, toward_mode: 0 } },
+        };
+      }
       if (service !== "get_geojson") return {};
       if (options.map === "error") throw new Error("Demo: the integration did not answer");
       const response: FeatureCollection | Record<string, never> =

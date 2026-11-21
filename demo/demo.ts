@@ -43,6 +43,7 @@ const options: DemoOptions = {
   language: params.get("lang") ?? "en",
   map: (params.get("map") as DemoOptions["map"]) ?? "ready",
   singleMower: params.has("single"),
+  legacy: params.has("legacy"),
   onCall: (call) => {
     window.demoCalls.push(call);
     const item = document.createElement("li");
