@@ -1,6 +1,6 @@
 {
   "name": "mammotion-mow-planner-card",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Home Assistant Lovelace card to plan, preview and start a Mammotion mow from an interactive map.",
   "license": "MIT",
