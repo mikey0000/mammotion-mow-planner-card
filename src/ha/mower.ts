@@ -45,6 +45,19 @@ export interface Mower {
   readonly heldSettings: readonly SettingName[];
   /** Present while a job is under way. */
   readonly runningJob?: RunningJob;
+  /**
+   * The planning entity of each setting that has one, by entity id. Only an integration that reports the
+   * running job is listed: its setters touch the mower only during a job, which the card can then tell.
+   */
+  readonly settingEntities?: Partial<Record<SettingName, string>>;
+}
+
+/** An entity service call that stores a setting in its planning entity. */
+export interface SettingWrite {
+  readonly entityId: string;
+  readonly domain: string;
+  readonly service: string;
+  readonly data: Record<string, unknown>;
 }
 
 const LAPS = ["none", "one", "two", "three", "four"] as const;
@@ -111,6 +124,28 @@ const RUNNING_JOB_SETTINGS: readonly SettingName[] = [
 
 /** An integration without the running-job attributes resets auto-reverse from the job before sending. */
 const LEGACY_RUNNING_JOB_SETTINGS = RUNNING_JOB_SETTINGS.filter((name) => name !== "autoChangeDirection");
+
+/** Each setting's planning entity, by domain and translation key. */
+const SETTING_ENTITIES: Readonly<Record<SettingName, readonly ["select" | "number" | "switch", string]>> = {
+  pattern: ["select", "channel_mode"],
+  angleMode: ["select", "cutting_angle_mode"],
+  angle: ["number", "cutting_angle"],
+  crossAngle: ["number", "toward_included_angle"],
+  spacingCm: ["number", "path_spacing"],
+  perimeterLaps: ["select", "mowing_laps"],
+  obstacleLaps: ["select", "obstacle_laps"],
+  mowOrder: ["select", "border_mode"],
+  speed: ["number", "working_speed"],
+  bladeHeight: ["number", "blade_height"],
+  edgeDistance: ["number", "ride_boundary_distance"],
+  obstacleDetection: ["select", "bypass_mode"],
+  startProgress: ["number", "start_progress"],
+  autoChangeDirection: ["switch", "auto_change_direction"],
+  cutGrass: ["switch", "is_mow"],
+  dumpGrass: ["switch", "is_dump"],
+  cutEdges: ["switch", "is_edge"],
+  dumpInterval: ["number", "dumping_interval"],
+};
 
 type Lookup = (key: string) => HassEntity | undefined;
 
@@ -423,6 +458,14 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
       ? reportedRunningJob(job, modifiable)
       : undefined;
   const { settings, heldSettings } = readSettings(lookups, limits);
+  const settingEntities = Object.fromEntries(
+    reported
+      ? (Object.keys(SETTING_ENTITIES) as SettingName[]).flatMap((name) => {
+          const entity = available(find(...SETTING_ENTITIES[name]));
+          return entity ? [[name, entity.entity_id]] : [];
+        })
+      : [],
+  );
   const position = readPosition(find("device_tracker", "device_tracker"));
   const battery = stateNumber(
     entities.find(
@@ -440,6 +483,7 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
     settings: { ...settings, ...(reported && isJob(job) && jobSettings(job, limits)) },
     heldSettings,
     ...(runningJob && { runningJob }),
+    ...(Object.keys(settingEntities).length > 0 && { settingEntities }),
   };
 }
 
@@ -485,6 +529,35 @@ export function startMowData(
   areaEntityIds: readonly string[],
 ): Record<string, unknown> {
   return { areas: [...areaEntityIds], ...serviceFields(settings, names) };
+}
+
+/** The entity's own option key for a select setting's value, when the mower offers one. */
+function optionOf(name: SettingName, value: unknown, limits: SettingLimits): string | undefined {
+  if (name === "perimeterLaps" || name === "obstacleLaps") return LAPS[value as number];
+  if (name === "obstacleDetection")
+    return limits.obstacleDetection?.find((option) => option.code === value)?.key;
+  return String(value);
+}
+
+/** The call that stores `value` in the setting's planning entity, or undefined when it has none. */
+export function settingWrite(mower: Mower, name: SettingName, value: unknown): SettingWrite | undefined {
+  const entityId = mower.settingEntities?.[name];
+  if (!entityId || value === undefined) return undefined;
+  const [domain] = SETTING_ENTITIES[name];
+  if (domain === "switch") return { entityId, domain, service: value ? "turn_on" : "turn_off", data: {} };
+  if (domain === "number") {
+    const number = name === "speed" || name === "edgeDistance" ? hundredths(value as number) : value;
+    return { entityId, domain, service: "set_value", data: { value: number } };
+  }
+  const option = optionOf(name, value, mower.limits);
+  return option === undefined ? undefined : { entityId, domain, service: "select_option", data: { option } };
+}
+
+export async function writeSetting(
+  hass: HomeAssistant,
+  { entityId, domain, service, data }: SettingWrite,
+): Promise<void> {
+  await hass.callService(domain, service, data, { entity_id: entityId }, false, false);
 }
 
 /** `mammotion.modify_running_job` service data; the job keeps its own value for every setting left out. */

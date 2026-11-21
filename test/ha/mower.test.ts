@@ -9,8 +9,10 @@ import {
   mowerName,
   planRoute,
   readMower,
+  settingWrite,
   startMow,
   startMowData,
+  writeSetting,
 } from "../../src/ha/mower";
 import type { MowSettings } from "../../src/model";
 import { device, entityResponse, lubaEntities, makeHass, serviceError, withChanges } from "./_helpers";
@@ -966,5 +968,98 @@ describe("planRoute", () => {
         data,
       ),
     ).rejects.toThrow(/^$/);
+  });
+});
+
+describe("settingWrite", () => {
+  const reporting = (changes: Parameters<typeof withChanges>[1] = {}) =>
+    readLuba({
+      "lawn_mower.luba": {
+        state: "docked",
+        attributes: { friendly_name: "Luba", running_job: null, running_job_modifiable: false },
+      },
+      ...changes,
+    });
+
+  it("lists the planning entities only for an integration that reports the running job", () => {
+    expect(readLuba()).not.toHaveProperty("settingEntities");
+    expect(reporting()?.settingEntities).toMatchObject({
+      pattern: "select.luba_channel_mode",
+      angle: "number.luba_cutting_angle",
+      cutGrass: "switch.luba_is_mow",
+      dumpInterval: "number.luba_dumping_interval",
+    });
+    expect(
+      reporting({ "number.luba_path_spacing": { state: "unavailable" } })?.settingEntities,
+    ).not.toHaveProperty("spacingCm");
+  });
+
+  it.each([
+    ["pattern", "double_grid", "select.luba_channel_mode", "select_option", { option: "double_grid" }],
+    [
+      "angleMode",
+      "relative_angle",
+      "select.luba_cutting_angle_mode",
+      "select_option",
+      { option: "relative_angle" },
+    ],
+    ["angle", -45, "number.luba_cutting_angle", "set_value", { value: -45 }],
+    ["crossAngle", 120, "number.luba_toward_included_angle", "set_value", { value: 120 }],
+    ["spacingCm", 30, "number.luba_path_spacing", "set_value", { value: 30 }],
+    ["perimeterLaps", 0, "select.luba_mowing_laps", "select_option", { option: "none" }],
+    ["obstacleLaps", 4, "select.luba_obstacle_laps", "select_option", { option: "four" }],
+    ["mowOrder", "grid_first", "select.luba_border_mode", "select_option", { option: "grid_first" }],
+    ["speed", 0.30000000000000004, "number.luba_working_speed", "set_value", { value: 0.3 }],
+    ["bladeHeight", 45, "number.luba_blade_height", "set_value", { value: 45 }],
+    ["edgeDistance", 0.5, "number.luba_ride_boundary_distance", "set_value", { value: 0.5 }],
+    ["obstacleDetection", 1, "select.luba_bypass_mode", "select_option", { option: "off" }],
+    ["startProgress", 25, "number.luba_start_progress", "set_value", { value: 25 }],
+    ["autoChangeDirection", false, "switch.luba_auto_change_direction", "turn_off", {}],
+    ["cutGrass", true, "switch.luba_is_mow", "turn_on", {}],
+    ["dumpGrass", false, "switch.luba_is_dump", "turn_off", {}],
+    ["cutEdges", true, "switch.luba_is_edge", "turn_on", {}],
+    ["dumpInterval", 35, "number.luba_dumping_interval", "set_value", { value: 35 }],
+  ] as const)("stores %s = %j through %s", (name, value, entityId, service, data) => {
+    const mower = reporting();
+    if (!mower) throw new Error("no mower");
+
+    expect(settingWrite(mower, name, value)).toEqual({
+      entityId,
+      domain: entityId.split(".")[0],
+      service,
+      data,
+    });
+  });
+
+  it("stores nothing for a detection code the mower does not offer, or without an entity", () => {
+    const mower = reporting({ "switch.luba_is_edge": null });
+    if (!mower) throw new Error("no mower");
+
+    expect(settingWrite(mower, "obstacleDetection", 2)).toBeUndefined();
+    expect(settingWrite(mower, "cutEdges", true)).toBeUndefined();
+  });
+});
+
+describe("writeSetting", () => {
+  it("calls the entity's own service, leaving errors to the caller", async () => {
+    const hass = makeHass([]);
+
+    await writeSetting(hass, {
+      entityId: "number.x",
+      domain: "number",
+      service: "set_value",
+      data: { value: 3 },
+    });
+
+    expect(hass.calls).toEqual([
+      {
+        domain: "number",
+        service: "set_value",
+        data: { value: 3 },
+        target: { entity_id: "number.x" },
+        notifyOnError: false,
+        returnResponse: false,
+      },
+    ]);
   });
 });
