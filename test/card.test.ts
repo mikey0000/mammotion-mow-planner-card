@@ -861,6 +861,16 @@ describe("confirming a start", () => {
     expect(callsTo(hass, "start_mow")).toEqual([]);
   });
 
+  it("keeps the map from being refreshed under an open confirmation", async () => {
+    const card = await mount(lubaHass());
+    await toReview(card);
+    expect(button(card, "Refresh map").disabled).toBe(false);
+
+    await openConfirm(card);
+
+    expect(button(card, "Refresh map").disabled).toBe(true);
+  });
+
   it("cancels with Escape", async () => {
     const hass = lubaHass();
     const card = await mount(hass);
@@ -985,12 +995,19 @@ describe("what a start sends", () => {
     await toReviewWith(card, { bladeHeight: 60 });
     await startMowing(card);
 
-    expect(startData(hass)[1]).toEqual({
-      areas: [FRONT],
-      ...heldFields,
-      channel_width: 30,
-      blade_height: 60,
-    });
+    expect(startData(hass)[1]).toEqual({ areas: [FRONT], ...heldFields, blade_height: 60 });
+  });
+
+  it("shows the mower's own setting in the review for a value the card would not send", async () => {
+    const entities = withChanges(lubaEntities(), { "number.luba_blade_height": { state: "unknown" } });
+    const card = await mount(lubaHass(withMap, entities));
+    await toReview(card);
+    expect(rows(card)["Cutting height"]).toBe("Mower's own setting");
+
+    await click(card, button(card, "2Pattern"));
+    await editSettings(card, { bladeHeight: 60 });
+    await click(card, button(card, "Next"));
+    expect(rows(card)["Cutting height"]).toBe("60 mm");
   });
 
   it("sends a setting whose entity is missing only once it is edited", async () => {
@@ -1141,6 +1158,19 @@ describe("while a start is in flight", () => {
 });
 
 describe("after a start", () => {
+  it("starts the new plan afresh, without the last plan's area picks or edits", async () => {
+    const card = await mount(lubaHass());
+    await click(card, chip(card, "Back lawn"));
+    await toReviewWith(card, { spacingCm: 30 });
+    await startMowing(card);
+
+    await click(card, button(card, "New plan"));
+
+    expect(pressed(card)).toEqual(["1Area Front"]);
+    await click(card, button(card, "Next"));
+    expect(panel(card).settings).toEqual(LUBA_SETTINGS);
+  });
+
   it("offers a new plan instead of a second start", async () => {
     const hass = lubaHass();
     const card = await mount(hass);

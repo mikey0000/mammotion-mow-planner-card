@@ -135,4 +135,5 @@ export const de: Record<keyof typeof en, string> = {
   "optimal.confirm":
     "{name} diese Flächen planen lassen, um seine Richtung zu ermitteln? Das Mähen startet nicht, ein pausierter Auftrag würde aber verworfen.",
   "action.confirm_optimal": "Mäher fragen",
+  "review.mower_value": "Einstellung des Mähers",
 };

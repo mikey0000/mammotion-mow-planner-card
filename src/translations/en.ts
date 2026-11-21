@@ -130,4 +130,5 @@ export const en = {
   "optimal.confirm":
     "Ask {name} to plan these areas to learn its direction? It won't start mowing, but a paused job would be dropped.",
   "action.confirm_optimal": "Ask mower",
+  "review.mower_value": "Mower's own setting",
 };

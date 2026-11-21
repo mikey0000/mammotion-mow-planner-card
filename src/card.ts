@@ -392,11 +392,6 @@ export class MowPlannerCard extends LitElement {
     if (this.request.status !== "sent") this.cancelConfirm();
   }
 
-  private startOver(): void {
-    this.request = IDLE;
-    this.step = "areas";
-  }
-
   /** The settings to send: those an entity holds, plus those changed in the card. */
   private get sentSettings(): SettingName[] {
     return [...new Set([...(this.mower?.heldSettings ?? []), ...(Object.keys(this.edits) as SettingName[])])];
@@ -650,7 +645,7 @@ export class MowPlannerCard extends LitElement {
           class="icon-button"
           aria-label=${this.t("map.refresh")}
           title=${this.t("map.refresh")}
-          ?disabled=${this.map.status === "loading" || this.busy}
+          ?disabled=${this.map.status === "loading" || this.busy || this.request.status === "confirming"}
           @click=${() => void this.loadMap(true)}
         >
           ${this.renderIcon(mdiRefresh)}
@@ -822,41 +817,39 @@ export class MowPlannerCard extends LitElement {
     const detection = mower.limits.obstacleDetection?.find(
       (option) => option.code === settings.obstacleDetection,
     );
-    const onOff = (name: SettingName) =>
-      [this.t(SETTING_LABELS[name]), this.t(settings[name] ? "toggle.on" : "toggle.off")] as const;
+    // A setting the card would not send runs at a value it cannot see, so its fallback is not shown.
+    const sent = new Set<SettingName>(
+      this.job ? (Object.keys(settings) as SettingName[]) : this.sentSettings,
+    );
+    const row = (name: SettingName, value: string) =>
+      [this.t(SETTING_LABELS[name]), sent.has(name) ? value : this.t("review.mower_value")] as const;
     const angle =
-      settings.angleMode === "random_angle"
-        ? this.t("angle_mode.random_angle")
+      settings.angleMode === "random_angle" || !sent.has("angle")
+        ? this.t(`angle_mode.${settings.angleMode}`)
         : `${this.t(`angle_mode.${settings.angleMode}`)}, ${degrees(settings.angle)}`;
     const rows: (readonly [string, string] | false | undefined)[] = [
       [this.t("step.areas"), this.selectedAreas.map((area) => area.name).join(", ")],
-      [this.t("settings.pattern"), this.t(`pattern.${settings.pattern}`)],
-      striped && [this.t("settings.angle"), angle],
-      settings.pattern === "double_grid" && [this.t("settings.cross_angle"), degrees(settings.crossAngle)],
-      [this.t("settings.spacing"), this.t("unit.cm", { value: this.num(settings.spacingCm) })],
-      [this.t("settings.perimeter_laps"), this.num(settings.perimeterLaps)],
-      [this.t("settings.obstacle_laps"), this.num(settings.obstacleLaps)],
-      striped && [this.t("settings.mow_order"), this.t(`mow_order.${settings.mowOrder}`)],
-      [this.t("settings.speed"), this.t("unit.speed", { value: this.num(settings.speed, 1) })],
-      settings.bladeHeight !== undefined && [
-        this.t("settings.blade_height"),
-        this.t("unit.mm", { value: this.num(settings.bladeHeight) }),
-      ],
-      settings.edgeDistance !== undefined && [
-        this.t("settings.edge"),
-        this.t(settings.edgeDistance < 0.25 ? "edge.inside" : "edge.on"),
-      ],
-      detection && [this.t("settings.detection"), this.t(`detection.${detection.key}`)],
-      settings.startProgress !== undefined && [
-        this.t("settings.start_progress"),
-        this.t("unit.percent", { value: this.num(settings.startProgress) }),
-      ],
-      ...(mower.limits.switches ?? []).map(onOff),
+      row("pattern", this.t(`pattern.${settings.pattern}`)),
+      striped && row("angleMode", angle),
+      settings.pattern === "double_grid" && row("crossAngle", degrees(settings.crossAngle)),
+      row("spacingCm", this.t("unit.cm", { value: this.num(settings.spacingCm) })),
+      row("perimeterLaps", this.num(settings.perimeterLaps)),
+      row("obstacleLaps", this.num(settings.obstacleLaps)),
+      striped && row("mowOrder", this.t(`mow_order.${settings.mowOrder}`)),
+      row("speed", this.t("unit.speed", { value: this.num(settings.speed, 2) })),
+      settings.bladeHeight !== undefined &&
+        row("bladeHeight", this.t("unit.mm", { value: this.num(settings.bladeHeight) })),
+      settings.edgeDistance !== undefined &&
+        row("edgeDistance", this.t(settings.edgeDistance < 0.25 ? "edge.inside" : "edge.on")),
+      detection && row("obstacleDetection", this.t(`detection.${detection.key}`)),
+      settings.startProgress !== undefined &&
+        row("startProgress", this.t("unit.percent", { value: this.num(settings.startProgress) })),
+      ...(mower.limits.switches ?? []).map((name) =>
+        row(name, this.t(settings[name] ? "toggle.on" : "toggle.off")),
+      ),
       settings.dumpInterval !== undefined &&
-        settings.dumpGrass !== false && [
-          this.t("settings.dump_interval"),
-          this.t("unit.m2", { value: this.num(settings.dumpInterval) }),
-        ],
+        settings.dumpGrass !== false &&
+        row("dumpInterval", this.t("unit.m2", { value: this.num(settings.dumpInterval) })),
       this.pathLengthM > 0 && [
         this.t("review.distance"),
         this.t("summary.distance", { km: this.num(this.pathLengthM / 1000, 1) }),
@@ -1023,7 +1016,7 @@ export class MowPlannerCard extends LitElement {
                     class="primary"
                     data-focus
                     @click=${() => {
-                      this.startOver();
+                      this.resetPlan();
                     }}
                   >
                     ${this.t("action.new_plan")}
