@@ -323,6 +323,12 @@ export interface DemoOptions {
   readonly singleMower?: boolean;
   /** Stands for an integration from before `mammotion.plan_route`. */
   readonly legacy?: boolean;
+  /** Entity states saved by earlier visits, by entity id. */
+  readonly saved?: Readonly<Record<string, string>>;
+  /** Called with the new `hass` after an entity service changed a state, as Home Assistant pushes one. */
+  readonly onChange?: (hass: HomeAssistant, entityId: string, state: string) => void;
+  /** Makes every entity service call fail, to try a failed save. */
+  readonly failWrites?: boolean;
 }
 
 /** The frontend rejects a failed call with the server's translated error object, not an `Error`. */
@@ -336,8 +342,42 @@ export function demoHass(options: DemoOptions): HomeAssistant {
   const pairs = mowers.flatMap(mowerEntities);
   const language = options.language ?? "en";
   const ACTIVE = ["mowing", "paused", "returning"];
-  return {
-    states: Object.fromEntries(pairs.map(([state]) => [state.entity_id, state])),
+  let states: Record<string, HassEntity> = Object.fromEntries(
+    pairs.map(([entity]) => [
+      entity.entity_id,
+      { ...entity, state: options.saved?.[entity.entity_id] ?? entity.state },
+    ]),
+  );
+  /** Applies what an entity service would store, refusing what Home Assistant would refuse. */
+  const store = (domain: string, service: string, entityId: string, data: Record<string, unknown>) => {
+    const entity = states[entityId];
+    if (!entity) return serviceError("service_validation_error", `${entityId} does not exist`);
+    if (options.failWrites) return serviceError("home_assistant_error", "The demo refuses to save");
+    const {
+      options: choices,
+      min,
+      max,
+    } = entity.attributes as { options?: string[]; min?: number; max?: number };
+    let state: string;
+    if (domain === "select") {
+      if (!choices?.includes(String(data.option)))
+        return serviceError("service_validation_error", "Invalid option");
+      state = String(data.option);
+    } else if (domain === "number") {
+      const value = Number(data.value);
+      if (value < (min ?? -Infinity) || value > (max ?? Infinity)) {
+        return serviceError("service_validation_error", `Value ${value} is out of range`);
+      }
+      state = String(value);
+    } else {
+      state = service === "turn_on" ? "on" : "off";
+    }
+    states = { ...states, [entityId]: { ...entity, state } };
+    options.onChange?.(build(), entityId, state);
+    return Promise.resolve({});
+  };
+  const build = (): HomeAssistant => ({ ...base, states });
+  const base: Omit<HomeAssistant, "states"> = {
     entities: Object.fromEntries(pairs.map(([, entry]) => [entry.entity_id, entry])),
     devices: Object.fromEntries(
       mowers.map((mower) => [
@@ -356,9 +396,12 @@ export function demoHass(options: DemoOptions): HomeAssistant {
         ),
       ),
     },
-    callService: (async (domain, service, data = {}, target) => {
+    callService: async (domain, service, data = {}, target) => {
       options.onCall({ domain, service, data, target });
       await new Promise((resolve) => setTimeout(resolve, 350));
+      if (["select", "number", "switch"].includes(domain) && typeof target?.entity_id === "string") {
+        return store(domain, service, target.entity_id, data);
+      }
       const mower = mowers.find((candidate) => target?.entity_id === `lawn_mower.${candidate.slug}`);
       if (service === "plan_route" && mower) {
         if (ACTIVE.includes(mower.state)) {
@@ -376,8 +419,9 @@ export function demoHass(options: DemoOptions): HomeAssistant {
       const response: FeatureCollection | Record<string, never> =
         options.map === "empty" || !mower ? {} : { type: "FeatureCollection", features: mower.features };
       return { response };
-    }) as HomeAssistant["callService"],
+    },
   };
+  return build();
 }
 
 /** The mower's planned route: plain stripes at each area's own direction. */

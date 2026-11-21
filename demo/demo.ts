@@ -36,6 +36,18 @@ const dark = params.has("dark");
 document.documentElement.classList.toggle("dark", dark);
 document.documentElement.dir = params.get("lang") === "he" ? "rtl" : "ltr";
 
+/** Entity states the card saved, kept across reloads like Home Assistant keeps them. */
+const SAVED_KEY = "mmp-demo-states";
+const readSaved = (): Record<string, string> => {
+  try {
+    if (params.has("reset")) localStorage.removeItem(SAVED_KEY);
+    return JSON.parse(localStorage.getItem(SAVED_KEY) ?? "{}") as Record<string, string>;
+  } catch {
+    return {};
+  }
+};
+const saved = readSaved();
+
 window.demoCalls = [];
 const log = document.querySelector("#log ol");
 const options: DemoOptions = {
@@ -44,6 +56,17 @@ const options: DemoOptions = {
   map: (params.get("map") as DemoOptions["map"]) ?? "ready",
   singleMower: params.has("single"),
   legacy: params.has("legacy"),
+  failWrites: params.has("failsave"),
+  saved,
+  onChange: (hass, entityId, state) => {
+    saved[entityId] = state;
+    try {
+      localStorage.setItem(SAVED_KEY, JSON.stringify(saved));
+    } catch {
+      // Private windows may refuse storage; the change still shows until the page is left.
+    }
+    card.hass = hass;
+  },
   onCall: (call) => {
     window.demoCalls.push(call);
     const item = document.createElement("li");
