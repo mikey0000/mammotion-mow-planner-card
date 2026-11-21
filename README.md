@@ -2,6 +2,8 @@
 
 A Home Assistant dashboard card for the [Mammotion integration](https://github.com/mikey0000/Mammotion-HA). Pick the areas to mow on the map, set the pattern, and see what the mow will look like before you start it.
 
+![The planner on a desktop dashboard: map with mown bands, pattern settings and the angle dial](docs/planner-desktop.png)
+
 - **Areas.** Tap areas on the map or in the list. They are mowed in the order you tap them.
 - **Pattern.** Change the path angle, pattern, path spacing, perimeter laps and no-go zone laps, and watch the stripes redraw on the map as you drag. Turn the path angle with the clock dial beside the angle sliders: drag a hand, or focus it and use the arrow keys (Shift for 15° steps). **Grid** adds a second hand for the crossing angle, which turns along with the first. **More settings** holds speed, cutting height, edge coverage, obstacle detection, auto-reverse direction, start progress and, on Yuka models with a grass collector, the collection settings.
 - **Review.** Check the summary, the path length and the estimated time, then start the job.
