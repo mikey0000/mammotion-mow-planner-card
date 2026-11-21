@@ -10,13 +10,14 @@ A Home Assistant dashboard card for the [Mammotion integration](https://github.c
 
 The card shows a setting only when your mower has the matching integration entity, and takes its range or choices from that entity, so each model gets the settings it actually has.
 
-The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card saves it to the mower's own setting in the integration (the planning select, number and switch entities), so the next visit, on any device, starts from it. Dragging a slider or the dial saves once you let go and the value settles. If a save fails, the card says so and shows the stored value again. The chosen areas are not saved: the integration's area switches keep which areas are on but not the mowing order. During a job nothing is saved; changes go to the running job instead (see [During a job](#during-a-job)). With an integration older than 0.6.24 settings are not saved and travel with the start command only.
+The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card saves it to the mower's own setting in the integration (the planning select, number and switch entities), so the next visit, on any device, starts from it. Dragging a slider or the dial saves once you let go and the value settles. If a save fails, the card says so and shows the stored value again. With integration 0.6.25 or newer the chosen areas are saved too, in mowing order, to the integration's area switches; with an older one they stay in the card and travel with the start command. During a job nothing is saved; changes go to the running job instead (see [During a job](#during-a-job)). With an integration older than 0.6.24 settings are not saved and travel with the start command only.
 
 ## Requirements
 
 - Home Assistant 2024.11 or newer.
 - The Mammotion integration, with at least one mower that has a map.
 - Mammotion integration 0.6.24 or newer for **Find optimal direction**, **Get route from mower** (`mammotion.plan_route`) and for changing a running job exactly (the `running_job` attributes). Older versions get the rest of the card; see [During a job](#during-a-job) for what changes.
+- Mammotion integration 0.6.25 or newer to save the chosen areas and their mowing order.
 
 ## Install
 
