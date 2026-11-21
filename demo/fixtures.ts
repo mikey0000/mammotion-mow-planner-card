@@ -301,6 +301,8 @@ function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntr
         return entity(`switch.${mower.slug}_area_${index + 1}`, "area_plain", index === 0 ? "on" : "off", {
           hash,
           friendly_name: `${mower.name} ${Name}`,
+          // An integration that reports the running job (0.6.25) also keeps the mowing order.
+          ...(mower.runningJob !== undefined && { order: index === 0 ? 1 : null }),
         });
       }),
   ];
@@ -313,6 +315,8 @@ export interface ServiceCall {
   readonly target?: { entity_id?: string | string[] };
 }
 
+export type SavedEntity = Pick<HassEntity, "state" | "attributes">;
+
 export interface DemoOptions {
   /** Called for every service call instead of anything reaching a mower. */
   readonly onCall: (call: ServiceCall) => void;
@@ -323,10 +327,10 @@ export interface DemoOptions {
   readonly singleMower?: boolean;
   /** Stands for an integration from before `mammotion.plan_route`. */
   readonly legacy?: boolean;
-  /** Entity states saved by earlier visits, by entity id. */
-  readonly saved?: Readonly<Record<string, string>>;
-  /** Called with the new `hass` after an entity service changed a state, as Home Assistant pushes one. */
-  readonly onChange?: (hass: HomeAssistant, entityId: string, state: string) => void;
+  /** Entities saved by earlier visits, by entity id. */
+  readonly saved?: Readonly<Record<string, SavedEntity>>;
+  /** Called with the new `hass` and the entities that changed, as Home Assistant pushes a new one. */
+  readonly onChange?: (hass: HomeAssistant, changed: Readonly<Record<string, SavedEntity>>) => void;
   /** Makes every entity service call fail, to try a failed save. */
   readonly failWrites?: boolean;
 }
@@ -343,10 +347,7 @@ export function demoHass(options: DemoOptions): HomeAssistant {
   const language = options.language ?? "en";
   const ACTIVE = ["mowing", "paused", "returning"];
   let states: Record<string, HassEntity> = Object.fromEntries(
-    pairs.map(([entity]) => [
-      entity.entity_id,
-      { ...entity, state: options.saved?.[entity.entity_id] ?? entity.state },
-    ]),
+    pairs.map(([entity]) => [entity.entity_id, { ...entity, ...options.saved?.[entity.entity_id] }]),
   );
   /** Applies what an entity service would store, refusing what Home Assistant would refuse. */
   const store = (domain: string, service: string, entityId: string, data: Record<string, unknown>) => {
@@ -372,9 +373,39 @@ export function demoHass(options: DemoOptions): HomeAssistant {
     } else {
       state = service === "turn_on" ? "on" : "off";
     }
-    states = { ...states, [entityId]: { ...entity, state } };
-    options.onChange?.(build(), entityId, state);
+    const changed =
+      "order" in entity.attributes ? reorder(entityId, state === "on") : { [entityId]: { ...entity, state } };
+    states = { ...states, ...changed };
+    options.onChange?.(build(), changed);
     return Promise.resolve({});
+  };
+  /** Like the integration: a switch turned on joins the end of the mowing order, one turned off leaves it. */
+  const reorder = (entityId: string, on: boolean): Record<string, HassEntity> => {
+    const prefix = entityId.replace(/\d+$/, "");
+    const siblings = Object.values(states).filter((entity) => entity.entity_id.startsWith(prefix));
+    const order = (entity: HassEntity) => entity.attributes.order as number | null;
+    const sequence = siblings
+      .filter((entity) => order(entity) !== null)
+      .sort((a, b) => (order(a) ?? 0) - (order(b) ?? 0))
+      .map((entity) => entity.entity_id);
+    const placed = on
+      ? sequence.includes(entityId)
+        ? sequence
+        : [...sequence, entityId]
+      : sequence.filter((id) => id !== entityId);
+    return Object.fromEntries(
+      siblings.map((entity) => {
+        const place = placed.indexOf(entity.entity_id) + 1;
+        return [
+          entity.entity_id,
+          {
+            ...entity,
+            state: place ? "on" : "off",
+            attributes: { ...entity.attributes, order: place || null },
+          },
+        ];
+      }),
+    );
   };
   const build = (): HomeAssistant => ({ ...base, states });
   const base: Omit<HomeAssistant, "states"> = {

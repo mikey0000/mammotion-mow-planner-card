@@ -1,7 +1,7 @@
 import "../src/index";
 import { CARD_TYPE } from "../src/config";
 import type { HomeAssistant } from "../src/ha/types";
-import { demoHass, type DemoOptions, type ServiceCall } from "./fixtures";
+import { demoHass, type DemoOptions, type SavedEntity, type ServiceCall } from "./fixtures";
 
 interface CardElement extends HTMLElement {
   hass: HomeAssistant;
@@ -38,10 +38,14 @@ document.documentElement.dir = params.get("lang") === "he" ? "rtl" : "ltr";
 
 /** Entity states the card saved, kept across reloads like Home Assistant keeps them. */
 const SAVED_KEY = "mmp-demo-states";
-const readSaved = (): Record<string, string> => {
+const readSaved = (): Record<string, SavedEntity> => {
   try {
     if (params.has("reset")) localStorage.removeItem(SAVED_KEY);
-    return JSON.parse(localStorage.getItem(SAVED_KEY) ?? "{}") as Record<string, string>;
+    const stored = JSON.parse(localStorage.getItem(SAVED_KEY) ?? "{}") as Record<string, unknown>;
+    // Earlier demo versions kept bare state strings.
+    return Object.fromEntries(
+      Object.entries(stored).filter((entry): entry is [string, SavedEntity] => typeof entry[1] === "object"),
+    );
   } catch {
     return {};
   }
@@ -58,8 +62,8 @@ const options: DemoOptions = {
   legacy: params.has("legacy"),
   failWrites: params.has("failsave"),
   saved,
-  onChange: (hass, entityId, state) => {
-    saved[entityId] = state;
+  onChange: (hass, changed) => {
+    Object.assign(saved, changed);
     try {
       localStorage.setItem(SAVED_KEY, JSON.stringify(saved));
     } catch {
