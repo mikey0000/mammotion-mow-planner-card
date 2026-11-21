@@ -10,14 +10,15 @@ A Home Assistant dashboard card for the [Mammotion integration](https://github.c
 
 The card shows a setting only when your mower has the matching integration entity, and takes its range or choices from that entity, so each model gets the settings it actually has.
 
-The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card saves it to the mower's own setting in the integration (the planning select, number and switch entities), so the next visit, on any device, starts from it. Dragging a slider or the dial saves once you let go and the value settles. If a save fails, the card says so and shows the stored value again. With integration 0.6.25 or newer the chosen areas are saved too, in mowing order, to the integration's area switches; with an older one they stay in the card and travel with the start command. During a job nothing is saved; changes go to the running job instead (see [During a job](#during-a-job)). With an integration older than 0.6.24 settings are not saved and travel with the start command only.
+The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card saves it to the mower's own setting in the integration (the planning select, number and switch entities), so the next visit, on any device, starts from it. Dragging a slider or the dial saves once you let go and the value settles. If a save fails, the card says so and shows the stored value again. The chosen areas are saved too, in mowing order, to the integration's area switches. During a job nothing is saved; changes go to the running job instead (see [During a job](#during-a-job)).
+
+After **Start now** the card shows that the job was sent, with **Start mowing** off, until the integration reports the running job; then it shows that job. If no job is reported within 30 seconds, the plan comes back so you can try again. A failed start leaves you on the review step with your plan and the error.
 
 ## Requirements
 
 - Home Assistant 2024.11 or newer.
 - The Mammotion integration, with at least one mower that has a map.
-- Mammotion integration 0.6.24 or newer for **Find optimal direction**, **Get route from mower** (`mammotion.plan_route`) and for changing a running job exactly (the `running_job` attributes). Older versions get the rest of the card; see [During a job](#during-a-job) for what changes.
-- Mammotion integration 0.6.25 or newer to save the chosen areas and their mowing order.
+- Mammotion integration 0.6.25 or newer. The card relies on its running-job attributes, the mowing order on its area switches and `mammotion.plan_route`; for a mower on an older integration it shows only a notice to update.
 
 ## Install
 
@@ -62,7 +63,7 @@ The preview is computed in the browser from the map and your settings. It is a f
 ### Path angle
 
 - **Custom** uses your angle as a fixed direction on the map: 0° runs east–west, 90° north–south.
-- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy; the integration also refuses while the mower holds an unfinished job. With an integration older than 0.6.24 the button is replaced by a note that a newer one is needed.
+- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy; the integration also refuses while the mower holds an unfinished job.
 - **Random** changes direction every job. The card shows one example.
 
 The mower measures custom angles in its own map frame, which can be rotated from true north. If the stripes on your lawn end up turned compared with the preview, set `angle_offset` to the difference.
@@ -82,7 +83,6 @@ While the mower has a job under way, the card changes that job instead of starti
 
 - The integration reports whether a job is running, whether it can be changed, and the job's own settings. The card shows those values; a setting the job does not report shows the integration's planning value.
 - The original Luba cannot change a running job, so every setting is greyed out on it.
-- With an older integration that lacks these attributes, the card guesses: a job counts as running while the mower is mowing, paused or returning short of 100 % progress, the settings shown are the planning values, a mower without the random path angle is taken for the original Luba, and auto-reverse direction stays greyed out because that integration drops it from a running job. If the guess is wrong, the integration refuses the change and the card says so.
 
 ## Development
 
@@ -92,7 +92,7 @@ npm run demo    # http://localhost:5173/demo/ with a mock Home Assistant
 npm run check   # typecheck, lint, tests and build
 ```
 
-The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a paused Yuka with a grass collector whose integration lacks the running-job attributes, to show the fallback. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty`, `?map=error` `?legacy` (an integration without `mammotion.plan_route`) or `?failsave` (every save fails) to the URL to try other states. Saved settings are kept in the browser across reloads; add `?reset` to start from the demo's defaults again.
+The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a docked Yuka with a grass collector. Starting a job makes the demo report it two seconds later. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty`, `?map=error`, `?old` (an integration older than 0.6.25), `?failsave` (every save fails) or `?failstart` (every start fails) to the URL to try other states. Saved settings are kept in the browser across reloads; add `?reset` to start from the demo's defaults again.
 
 `npm run build` writes `dist/mammotion-mow-planner-card.js`. Pushing a `v*` tag builds it and attaches it to the GitHub release, which is what HACS installs.
 
