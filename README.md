@@ -10,7 +10,7 @@ A Home Assistant dashboard card for the [Mammotion integration](https://github.c
 
 The card shows a setting only when your mower has the matching integration entity, and takes its range or choices from that entity, so each model gets the settings it actually has.
 
-The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card does not change the integration's entities; the values travel with the start command.
+The card reads the map and your current settings from the integration. A job is only sent after you press **Start mowing** and then confirm with **Start now**. Changing a setting in the card saves it to the mower's own setting in the integration (the planning select, number and switch entities), so the next visit, on any device, starts from it. Dragging a slider or the dial saves once you let go and the value settles. If a save fails, the card says so and shows the stored value again. The chosen areas are not saved: the integration's area switches keep which areas are on but not the mowing order. During a job nothing is saved; changes go to the running job instead (see [During a job](#during-a-job)). With an integration older than 0.6.24 settings are not saved and travel with the start command only.
 
 ## Requirements
 
@@ -91,7 +91,7 @@ npm run demo    # http://localhost:5173/demo/ with a mock Home Assistant
 npm run check   # typecheck, lint, tests and build
 ```
 
-The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a paused Yuka with a grass collector whose integration lacks the running-job attributes, to show the fallback. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty`, `?map=error` or `?legacy` (an integration without `mammotion.plan_route`) to the URL to try other states.
+The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a paused Yuka with a grass collector whose integration lacks the running-job attributes, to show the fallback. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty`, `?map=error` `?legacy` (an integration without `mammotion.plan_route`) or `?failsave` (every save fails) to the URL to try other states. Saved settings are kept in the browser across reloads; add `?reset` to start from the demo's defaults again.
 
 `npm run build` writes `dist/mammotion-mow-planner-card.js`. Pushing a `v*` tag builds it and attaches it to the GitHub release, which is what HACS installs.
 
