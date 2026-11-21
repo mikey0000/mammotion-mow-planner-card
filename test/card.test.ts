@@ -1751,6 +1751,147 @@ describe("saving settings to the mower's entities", () => {
   });
 });
 
+describe("saving area picks to the area switches", () => {
+  const IDLE_ATTRIBUTES = { friendly_name: "Luba", running_job: null, running_job_modifiable: false };
+  const areaState = (entity_id: string, friendly_name: string, hash: number, order: number | null) => ({
+    entity_id,
+    state: order ? "on" : "off",
+    attributes: { friendly_name, hash, order },
+  });
+  /** Area switch states with the integration's `order`, front and back lawn. */
+  const areaStates = (front: number | null, back: number | null) => ({
+    [FRONT]: areaState(FRONT, "Luba Area Front", 111, front),
+    [BACK]: areaState(BACK, "Luba Back lawn", 222, back),
+  });
+  const ordered = (front: number | null, back: number | null, respond: Responder = withMap, mower = {}) =>
+    lubaHass(
+      respond,
+      withChanges(lubaEntities(), {
+        [LUBA]: { attributes: IDLE_ATTRIBUTES, ...mower },
+        [FRONT]: areaStates(front, back)[FRONT],
+        [BACK]: areaStates(front, back)[BACK],
+      }),
+    );
+  /** The switches as the integration republishes them after the card's writes. */
+  const echo = (hass: FakeHass, front: number | null, back: number | null): FakeHass => ({
+    ...hass,
+    states: { ...hass.states, ...areaStates(front, back) },
+  });
+  const switchCalls = (hass: FakeHass) =>
+    hass.calls
+      .filter((call) => call.domain === "switch")
+      .map((call) => [call.service, call.target?.entity_id]);
+
+  async function settleWrites(card: MowPlannerCard): Promise<void> {
+    await vi.advanceTimersByTimeAsync(600);
+    await settle(card);
+  }
+
+  it("prefills the picks from the switches, in the integration's mowing order", async () => {
+    const card = await mount(ordered(2, 1));
+
+    expect(mapEl(card).selected).toEqual([222, 111]);
+  });
+
+  it("saves a pick by turning its switch on once the picks settle", async () => {
+    const hass = ordered(1, null);
+    const card = await mount(hass);
+
+    await click(card, chip(card, "Back lawn"));
+    expect(mapEl(card).selected).toEqual([111, 222]);
+    expect(switchCalls(hass)).toEqual([]);
+    await settleWrites(card);
+
+    expect(switchCalls(hass)).toEqual([["turn_on", BACK]]);
+  });
+
+  it("reorders by turning switches off and on again, one at a time", async () => {
+    const first = deferred();
+    const hass = ordered(1, 2, (service, call) =>
+      call.domain === "switch" && switchCalls(hass).length === 1 ? first.promise : withMap(service, call),
+    );
+    const card = await mount(hass);
+    await click(card, chip(card, "Area Front"));
+    await click(card, chip(card, "Area Front"));
+    expect(mapEl(card).selected).toEqual([222, 111]);
+
+    await settleWrites(card);
+    expect(switchCalls(hass)).toEqual([["turn_off", FRONT]]);
+    first.resolve(undefined);
+    await settle(card);
+
+    expect(switchCalls(hass)).toEqual([
+      ["turn_off", FRONT],
+      ["turn_on", FRONT],
+    ]);
+  });
+
+  it("holds the picks until the switches show them, then follows the switches", async () => {
+    const hass = ordered(1, null);
+    const card = await mount(hass);
+    await click(card, chip(card, "Area Front"));
+    await click(card, chip(card, "Back lawn"));
+    await settleWrites(card);
+
+    await update(card, echo(hass, null, null));
+    expect(mapEl(card).selected).toEqual([222]);
+    await update(card, echo(hass, null, 1));
+    await update(card, echo(hass, 1, null));
+
+    expect(mapEl(card).selected).toEqual([111]);
+  });
+
+  it("reports a failed save and falls back to the switches", async () => {
+    const hass = ordered(1, null, (service, call) =>
+      call.domain === "switch" ? serviceError("Switch is unavailable") : withMap(service, call),
+    );
+    const card = await mount(hass);
+    await click(card, chip(card, "Back lawn"));
+
+    await settleWrites(card);
+
+    expect(alerts(card)).toEqual(["Couldn't save Areas. Switch is unavailable"]);
+    expect(mapEl(card).selected).toEqual([111]);
+  });
+
+  it("keeps the saved picks through New plan", async () => {
+    const hass = ordered(1, null);
+    const card = await mount(hass);
+    await click(card, chip(card, "Back lawn"));
+    await settleWrites(card);
+    await update(card, echo(hass, 1, 2));
+    await toReview(card);
+    await startMowing(card);
+
+    await click(card, button(card, "New plan"));
+
+    expect(mapEl(card).selected).toEqual([111, 222]);
+  });
+
+  it("writes nothing to switches that keep no order", async () => {
+    const hass = lubaHass(withMap, withChanges(lubaEntities(), { [LUBA]: { attributes: IDLE_ATTRIBUTES } }));
+    const card = await mount(hass);
+    await click(card, chip(card, "Back lawn"));
+    await settleWrites(card);
+
+    expect(switchCalls(hass)).toEqual([]);
+    expect(mapEl(card).selected).toEqual([111, 222]);
+  });
+
+  it("writes nothing during a job, showing the job's own areas", async () => {
+    const hass = ordered(1, null, withMap, {
+      state: "mowing",
+      attributes: { ...IDLE_ATTRIBUTES, running_job: { areas: [222] }, running_job_modifiable: true },
+    });
+    const card = await mount(hass);
+    await toggleOnMap(card, 111);
+    await settleWrites(card);
+
+    expect(mapEl(card).selected).toEqual([222]);
+    expect(switchCalls(hass)).toEqual([]);
+  });
+});
+
 describe("mower picker", () => {
   it("lists every mower as the heading", async () => {
     const card = await mount(twoMowers());

@@ -28,6 +28,7 @@ import {
   modifyRunningJob,
   mowerName,
   planRoute,
+  areaWrites,
   readMower,
   settingWrite,
   writeSetting,
@@ -165,6 +166,19 @@ export class MowPlannerCard extends LitElement {
       this.saved(entityId, error);
     },
   );
+  /** Saves the picked areas, in order, to the area switches of the mower keyed. */
+  private readonly areaWriter = new CoalescingWriter<readonly number[]>(
+    async (mowerId, target) => {
+      const hass = this.latestHass;
+      const mower = hass && readMower(hass, mowerId);
+      if (!hass || !mower) return;
+      // One switch at a time: the integration appends each one turned on to the mowing order.
+      for (const write of areaWrites(mower, target)) await writeSetting(hass, write);
+    },
+    (mowerId, error) => {
+      this.savedAreas(mowerId, error);
+    },
+  );
 
   setConfig(config: unknown): void {
     this.config = normalizeConfig(config);
@@ -220,7 +234,7 @@ export class MowPlannerCard extends LitElement {
 
   private get selectedAreas(): readonly AreaSwitch[] {
     const areas = this.mower?.areas ?? [];
-    const hashes = this.job?.areas ?? this.pickedHashes;
+    const hashes = this.job?.areas ?? this.pickedHashes ?? this.mower?.savedAreas;
     if (!hashes) return areas.filter((area) => area.on);
     return hashes.flatMap((hash) => areas.find((area) => area.hash === hash) ?? []);
   }
@@ -314,6 +328,7 @@ export class MowPlannerCard extends LitElement {
     this.hadFocus = this.matches(":focus-within");
     if (changed.has("mowerId")) {
       this.edits = {};
+      this.pickedHashes = undefined;
       this.resetPlan();
     }
     const jobMode = Boolean(this.job);
@@ -321,9 +336,13 @@ export class MowPlannerCard extends LitElement {
       this.jobMode = jobMode;
       // Several planning entities re-issue the running route when set, so nothing unsent may land during a job.
       this.writer.cancel();
+      this.areaWriter.cancel();
       this.edits = {};
     }
-    if (changed.has("mower")) this.dropSavedEdits();
+    if (changed.has("mower")) {
+      this.dropSavedEdits();
+      this.dropSavedPicks();
+    }
     this.refreshPreviews();
     if (this.request.status === "confirming" && this.refuses(this.request.plan.kind)) this.cancelConfirm();
   }
@@ -340,7 +359,7 @@ export class MowPlannerCard extends LitElement {
   /** Keeps the settings being saved: they are the mower's own now, not part of the plan. */
   private resetPlan(): void {
     this.step = "areas";
-    this.pickedHashes = undefined;
+    if (!this.savesAreas) this.pickedHashes = undefined;
     this.edits = Object.fromEntries(
       Object.entries(this.edits).filter(([name]) => this.saves(name as SettingName)),
     );
@@ -400,19 +419,46 @@ export class MowPlannerCard extends LitElement {
   private toggleArea(hash: number): void {
     if (this.busy || this.job || !this.mower?.areas.some((area) => area.hash === hash)) return;
     const hashes = this.selectedAreas.map((area) => area.hash);
-    this.pickedHashes = hashes.includes(hash) ? hashes.filter((h) => h !== hash) : [...hashes, hash];
-    this.findingOptimal = "idle";
-    this.forgetOutcome();
+    this.pick(hashes.includes(hash) ? hashes.filter((h) => h !== hash) : [...hashes, hash]);
   }
 
   private toggleAll(): void {
     if (this.busy || this.job) return;
     const all = (this.mower?.areas ?? []).map((area) => area.hash);
     const picked = this.selectedAreas.map((area) => area.hash);
-    this.pickedHashes =
-      picked.length === all.length ? [] : [...picked, ...all.filter((hash) => !picked.includes(hash))];
+    this.pick(
+      picked.length === all.length ? [] : [...picked, ...all.filter((hash) => !picked.includes(hash))],
+    );
+  }
+
+  /** Picks areas in mowing order, saving them to the area switches where the integration keeps the order. */
+  private pick(hashes: readonly number[]): void {
+    this.pickedHashes = hashes;
+    this.saveError = undefined;
+    if (this.savesAreas && this.mowerId) this.areaWriter.write(this.mowerId, hashes);
     this.findingOptimal = "idle";
     this.forgetOutcome();
+  }
+
+  private get savesAreas(): boolean {
+    return !this.job && this.mower?.savedAreas !== undefined;
+  }
+
+  /** Follows the switches again once they hold the picks and nothing is left to write. */
+  private dropSavedPicks(): void {
+    const { pickedHashes, mower, mowerId } = this;
+    if (!pickedHashes || !mower?.savedAreas || !mowerId || this.areaWriter.pending(mowerId)) return;
+    if (pickedHashes.join() === mower.savedAreas.join()) this.pickedHashes = undefined;
+  }
+
+  private savedAreas(mowerId: string, error?: unknown): void {
+    if (mowerId !== this.mowerId) return;
+    if (error === undefined) {
+      this.dropSavedPicks();
+      return;
+    }
+    this.pickedHashes = undefined;
+    this.saveError = this.saveFailure("step.areas", error);
   }
 
   /** Records only the fields that changed, so the rest keep following the mower. */
@@ -458,11 +504,13 @@ export class MowPlannerCard extends LitElement {
       return;
     }
     this.edits = Object.fromEntries(Object.entries(this.edits).filter(([setting]) => setting !== name));
+    this.saveError = this.saveFailure(SETTING_LABELS[name], error);
+  }
+
+  private saveFailure(label: StringKey, error: unknown): string {
     const reason =
       typeof error === "object" && error !== null && "message" in error ? String(error.message) : "";
-    this.saveError = [this.t("save.failed", { setting: this.t(SETTING_LABELS[name]) }), reason]
-      .filter(Boolean)
-      .join(". ");
+    return [this.t("save.failed", { setting: this.t(label) }), reason].filter(Boolean).join(". ");
   }
 
   private goTo(step: Step): void {
