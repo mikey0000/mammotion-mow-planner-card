@@ -9,6 +9,8 @@ import { controlStyles } from "../styles";
 export type DialHand = "angle" | "crossAngle";
 
 const RADIUS = 48;
+/** At the default 136 px size the 120-unit dial draws 1.13 px per unit, so this is a 44 px touch target. */
+const HIT_RADIUS = 20;
 const TICK_DEG = 15;
 /** Degrees either side of a tick within which a dragged hand settles on it. */
 const CATCH_DEG = 3;
@@ -128,9 +130,12 @@ export class AngleDial extends LitElement {
         stroke: var(--card-background-color, #fff);
         stroke-width: 2;
       }
-      .knob:focus-visible .hit {
-        stroke: var(--hand-color);
+      .knob .ring {
+        fill: none;
         stroke-width: 2;
+      }
+      .knob:focus-visible .ring {
+        stroke: var(--hand-color);
       }
       .hub {
         fill: var(--card-background-color, #fff);
@@ -184,7 +189,8 @@ export class AngleDial extends LitElement {
           this.onKey(hand, event);
         }}
       >
-        <circle class="hit" r="13"></circle>
+        <circle class="hit" r=${HIT_RADIUS}></circle>
+        <circle class="ring" r="11"></circle>
         <circle class="dot" r="7"></circle>
       </g>
     </g>`;

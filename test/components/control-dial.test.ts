@@ -72,6 +72,15 @@ describe("<mow-planner-dial> hands", () => {
     expect(pointing(el, "Crossing angle")).toBe(140);
   });
 
+  it("gives each knob a touch target of at least 44 px at the default 136 px size", async () => {
+    const { el } = await mount({ crossAngle: 90 });
+    const radii = [...(el.shadowRoot?.querySelectorAll(".knob .hit") ?? [])].map((hit) =>
+      Number(hit.getAttribute("r")),
+    );
+    expect(radii).toHaveLength(2);
+    for (const r of radii) expect(2 * r * (136 / 120)).toBeGreaterThanOrEqual(44);
+  });
+
   it("draws the optimal direction only when asked", async () => {
     expect((await mount()).el.shadowRoot?.querySelector(".reference")).toBeNull();
     expect((await mount({ reference: true })).el.shadowRoot?.querySelector(".reference")).not.toBeNull();
