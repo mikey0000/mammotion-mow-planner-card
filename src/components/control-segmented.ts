@@ -32,7 +32,8 @@ export class SegmentedControl extends LitElement {
       .group {
         display: grid;
         grid-auto-flow: column;
-        grid-auto-columns: minmax(var(--mmp-control-height), 1fr);
+        /* Equal segments, except one whose longest word would not fit grows to it. */
+        grid-auto-columns: minmax(min-content, 1fr);
         border-radius: var(--mmp-radius);
         background: var(--mmp-surface);
       }
@@ -41,7 +42,7 @@ export class SegmentedControl extends LitElement {
         align-items: center;
         justify-content: center;
         gap: var(--ha-space-1, 4px);
-        min-width: 0;
+        min-width: var(--mmp-control-height);
         height: var(--mmp-control-height);
         padding-inline: var(--ha-space-2, 8px);
         border-radius: var(--mmp-radius);
@@ -56,10 +57,15 @@ export class SegmentedControl extends LitElement {
         background: var(--mmp-surface);
         color: var(--disabled-text-color, #9e9e9e);
       }
+      /* A long label takes a second line rather than being cut short. */
       .text {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
         overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        line-height: 1.15;
+        text-align: center;
+        overflow-wrap: break-word;
       }
       .icon {
         width: 20px;

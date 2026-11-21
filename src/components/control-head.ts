@@ -9,14 +9,16 @@ export const headStyles = css`
     gap: var(--ha-space-2, 8px);
     margin-block-end: var(--ha-space-1, 4px);
   }
+  /* Dimmed, but a locked setting's current value must stay readable. */
   :host([disabled]) .head > * {
-    color: var(--disabled-text-color, #9e9e9e);
+    color: var(--secondary-text-color, #727272);
   }
+  /* Wraps rather than hiding the end of a long value, such as an angle relative to the optimal one. */
   .value {
+    min-width: 0;
     font-weight: var(--ha-font-weight-medium, 500);
-    white-space: nowrap;
+    text-align: end;
+    overflow-wrap: break-word;
     unicode-bidi: plaintext;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 `;
