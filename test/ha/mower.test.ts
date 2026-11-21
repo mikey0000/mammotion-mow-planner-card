@@ -765,6 +765,16 @@ describe("startMowData", () => {
     });
   });
 
+  it("strips float noise from speed and edge coverage without coarsening a finer step", () => {
+    const data = startMowData(
+      { ...settings, speed: 0.25, edgeDistance: 0.30000000000000004 },
+      ["speed", "edgeDistance"],
+      areas,
+    );
+
+    expect(data).toEqual({ areas, speed: 0.25, ride_boundary_distance: 0.3 });
+  });
+
   it("sends auto-reverse off as 0", () => {
     expect(startMowData({ ...settings, autoChangeDirection: false }, ["autoChangeDirection"], areas)).toEqual(
       {

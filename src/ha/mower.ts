@@ -443,6 +443,9 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
   };
 }
 
+/** Strips float noise (0.30000000000000004) without coarsening a finer step than the slider's. */
+const hundredths = (value: number) => Math.round(value * 100) / 100;
+
 const SERVICE_FIELDS: { readonly [K in SettingName]: (value: NonNullable<MowSettings[K]>) => object } = {
   pattern: (value) => ({ channel_mode: OPTIONS.channel_mode.indexOf(value) }),
   angleMode: (value) => ({ toward_mode: OPTIONS.cutting_angle_mode.indexOf(value) }),
@@ -452,9 +455,9 @@ const SERVICE_FIELDS: { readonly [K in SettingName]: (value: NonNullable<MowSett
   perimeterLaps: (value) => ({ mowing_laps: value }),
   obstacleLaps: (value) => ({ obstacle_laps: value }),
   mowOrder: (value) => ({ border_mode: OPTIONS.border_mode.indexOf(value) }),
-  speed: (value) => ({ speed: Math.round(value * 10) / 10 }),
+  speed: (value) => ({ speed: hundredths(value) }),
   bladeHeight: (value) => ({ blade_height: Math.round(value) }),
-  edgeDistance: (value) => ({ ride_boundary_distance: value }),
+  edgeDistance: (value) => ({ ride_boundary_distance: hundredths(value) }),
   obstacleDetection: (value) => ({ ultra_wave: value }),
   startProgress: (value) => ({ start_progress: Math.round(value) }),
   autoChangeDirection: (value) => ({ auto_change_direction: value ? 1 : 0 }),
