@@ -11,11 +11,17 @@ const lonLat = ([x, y]: Xy): [number, number] => [
   ORIGIN.lat + y / METERS_PER_DEGREE,
 ];
 
-const polygon = (type_name: string, hash: number, Name: string, ring: readonly Xy[]): Feature => ({
-  type: "Feature",
-  properties: { type_name, hash, Name, title: Name },
-  geometry: { type: "Polygon", coordinates: [ring.map(lonLat)] },
-});
+/** Each polygon's outline in metres, by name, for drawing the demo's planned routes. */
+const RINGS = new Map<string, readonly Xy[]>();
+
+const polygon = (type_name: string, hash: number, Name: string, ring: readonly Xy[]): Feature => {
+  RINGS.set(Name, ring);
+  return {
+    type: "Feature",
+    properties: { type_name, hash, Name, title: Name },
+    geometry: { type: "Polygon", coordinates: [ring.map(lonLat)] },
+  };
+};
 
 const circle = (cx: number, cy: number, r: number, n = 16): Xy[] =>
   Array.from({ length: n }, (_, i) => {
@@ -107,6 +113,32 @@ const PADDOCK: Feature[] = [
   },
 ];
 
+const inside = ([x, y]: Xy, ring: readonly Xy[]) =>
+  ring.reduce((odd, [x1, y1], i) => {
+    const [x2, y2] = ring[(i + 1) % ring.length] ?? [x1, y1];
+    return y1 > y !== y2 > y && x < ((x2 - x1) * (y - y1)) / (y2 - y1) + x1 ? !odd : odd;
+  }, false);
+
+/** Passes 0.6 m apart at `deg` over an area, kept to its inside, standing in for the mower's own plan. */
+function plannedPasses(ring: readonly Xy[], deg: number): Xy[][] {
+  const [u, n] = [deg, deg + 90].map((d) => [Math.cos((d * Math.PI) / 180), Math.sin((d * Math.PI) / 180)]);
+  const [ux = 0, uy = 0] = u ?? [];
+  const [nx = 0, ny = 0] = n ?? [];
+  const runs: Xy[][] = [];
+  for (let t = -40; t <= 40; t += 0.6) {
+    let run: Xy[] = [];
+    for (let s = -40; s <= 40; s += 0.5) {
+      const point: Xy = [ux * s + nx * t, uy * s + ny * t];
+      if (inside(point, ring)) run.push(point);
+      else if (run.length) {
+        runs.push([run[0] ?? point, run.at(-1) ?? point]);
+        run = [];
+      }
+    }
+  }
+  return runs;
+}
+
 interface DemoMower {
   readonly slug: string;
   readonly name: string;
@@ -127,6 +159,8 @@ interface DemoMower {
   /** The `running_job` attribute; left out to stand for an integration that predates it. */
   readonly runningJob?: Readonly<Record<string, unknown>> | null;
   readonly features: Feature[];
+  /** The direction the demo mower plans each area in, by area name, for Optimal mode. */
+  readonly optimal?: Readonly<Record<string, number>>;
 }
 
 const MOWERS: readonly DemoMower[] = [
@@ -145,6 +179,7 @@ const MOWERS: readonly DemoMower[] = [
     progress: 0,
     runningJob: null,
     features: GARDEN,
+    optimal: { "Front lawn": 30, "Back lawn": 75, "Side strip": 0 },
   },
   {
     slug: "yuka_mini",
@@ -293,6 +328,7 @@ export function demoHass(options: DemoOptions): HomeAssistant {
   const mowers = options.singleMower ? MOWERS.slice(0, 1) : MOWERS;
   const pairs = mowers.flatMap(mowerEntities);
   const language = options.language ?? "en";
+  const planned = new Set<DemoMower>();
   return {
     states: Object.fromEntries(pairs.map(([state]) => [state.entity_id, state])),
     entities: Object.fromEntries(pairs.map(([, entry]) => [entry.entity_id, entry])),
@@ -309,12 +345,33 @@ export function demoHass(options: DemoOptions): HomeAssistant {
     callService: (async (domain, service, data = {}, target) => {
       options.onCall({ domain, service, data, target });
       await new Promise((resolve) => setTimeout(resolve, 350));
+      const mower = mowers.find((candidate) => target?.entity_id === `lawn_mower.${candidate.slug}`);
+      if (service === "start_mow" && data.plan_only === true && mower) planned.add(mower);
+      if (service === "get_mow_path_geojson")
+        return { response: mower && planned.has(mower) ? plannedRoute(mower) : {} };
       if (service !== "get_geojson") return {};
       if (options.map === "error") throw new Error("Demo: the integration did not answer");
-      const mower = mowers.find((candidate) => target?.entity_id === `lawn_mower.${candidate.slug}`);
       const response: FeatureCollection | Record<string, never> =
         options.map === "empty" || !mower ? {} : { type: "FeatureCollection", features: mower.features };
       return { response };
     }) as HomeAssistant["callService"],
+  };
+}
+
+/** The mower's planned route: plain stripes at each area's own direction. */
+function plannedRoute(mower: DemoMower): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: mower.features.flatMap((feature) => {
+      const { type_name, Name } = feature.properties as { type_name: string; Name: string };
+      const deg = mower.optimal?.[Name];
+      const ring = RINGS.get(Name);
+      if (type_name !== "area" || deg === undefined || !ring) return [];
+      return plannedPasses(ring, deg).map((run) => ({
+        type: "Feature" as const,
+        properties: { type_name: "mow_path" },
+        geometry: { type: "LineString" as const, coordinates: run.map(lonLat) },
+      }));
+    }),
   };
 }
