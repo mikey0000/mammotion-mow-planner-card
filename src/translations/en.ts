@@ -40,7 +40,6 @@ export const en = {
   "action.cancel": "Cancel",
   "action.confirm_start": "Start now",
   "action.confirm_route": "Get route",
-  "action.new_plan": "New plan",
   "route.confirm": "Ask {name} to plan this route? It won't start mowing.",
   "start.confirm": "Send {name} out to mow {areas}?",
   "action.starting": "Starting…",
@@ -130,6 +129,6 @@ export const en = {
   "optimal.confirm": "Ask {name} to plan these areas to learn its direction? It won't start mowing.",
   "action.confirm_optimal": "Ask mower",
   "review.mower_value": "Mower's own setting",
-  "optimal.unsupported": "Finding it needs Mammotion integration 0.6.24 or newer",
   "save.failed": "Couldn't save {setting}",
+  "warn.unsupported": "Needs Mammotion integration 0.6.25 or newer",
 };

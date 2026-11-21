@@ -146,8 +146,14 @@ const twoMowers = (respond: Responder = withMap) =>
     [
       ...lubaEntities(),
       ...withChanges(lubaEntities("dev2", "yuka"), {
-        "switch.yuka_area_front": { state: "off" },
-        "switch.yuka_back_lawn": { state: "on" },
+        "switch.yuka_area_front": {
+          state: "off",
+          attributes: { friendly_name: "Luba Area Front", hash: 111, order: null },
+        },
+        "switch.yuka_back_lawn": {
+          state: "on",
+          attributes: { friendly_name: "Luba Back lawn", hash: 222, order: 1 },
+        },
       }),
     ],
     [device("dev1", "Luba"), device("dev2", "Yuka")],
@@ -162,6 +168,24 @@ function nextHass(hass: FakeHass, changes: Readonly<Record<string, string | null
     return [[entityId, state === undefined ? entity : { ...entity, state }] as const];
   });
   return { ...hass, states: Object.fromEntries(states) };
+}
+
+/** A later `hass` where `job` is the running job the integration reports for `mower` (`null` for none). */
+function withJob(
+  hass: FakeHass,
+  job: Record<string, unknown> | null,
+  modifiable = true,
+  mower = LUBA,
+): FakeHass {
+  const entity = hass.states[mower];
+  if (!entity) throw new Error(`no ${mower}`);
+  const attributes = {
+    ...entity.attributes,
+    running_job: job,
+    running_job_modifiable: job !== null && modifiable,
+  };
+  const state = job ? "mowing" : "docked";
+  return { ...hass, states: { ...hass.states, [mower]: { ...entity, state, attributes } } };
 }
 
 const mounted: MowPlannerCard[] = [];
@@ -326,6 +350,15 @@ async function toReview(card: MowPlannerCard): Promise<void> {
 
 async function toReviewWith(card: MowPlannerCard, change: Partial<MowSettings>): Promise<void> {
   await click(card, button(card, "Next"));
+  await editSettings(card, change);
+  await click(card, button(card, "Next"));
+}
+
+/** After a start the card holds the sent message 30 s; then plan the next start from the settings. */
+async function nextStartWith(card: MowPlannerCard, change: Partial<MowSettings>): Promise<void> {
+  await vi.advanceTimersByTimeAsync(30_000);
+  await settle(card);
+  await click(card, button(card, "2Pattern"));
   await editSettings(card, change);
   await click(card, button(card, "Next"));
 }
@@ -904,7 +937,7 @@ describe("confirming a start", () => {
     await arm(card);
     const confirm = button(card, "Start now");
 
-    await update(card, nextHass(hass, { [LUBA]: "mowing" }));
+    await update(card, withJob(hass, { areas: [111] }));
     await forceClick(card, confirm);
 
     expect(confirmation(card)).toBeNull();
@@ -991,11 +1024,15 @@ describe("what a start sends", () => {
     await startMowing(card);
     expect(startData(hass)).toEqual([{ areas: [FRONT], ...heldFields, channel_width: 30 }]);
 
-    await click(card, button(card, "New plan"));
-    await toReviewWith(card, { bladeHeight: 60 });
+    await nextStartWith(card, { bladeHeight: 60 });
     await startMowing(card);
 
-    expect(startData(hass)[1]).toEqual({ areas: [FRONT], ...heldFields, blade_height: 60 });
+    expect(startData(hass)[1]).toEqual({
+      areas: [FRONT],
+      ...heldFields,
+      channel_width: 30,
+      blade_height: 60,
+    });
   });
 
   it("shows the mower's own setting in the review for a value the card would not send", async () => {
@@ -1020,8 +1057,7 @@ describe("what a start sends", () => {
     await startMowing(card);
     expect(startData(hass)).toEqual([{ areas: [FRONT], ...heldFields }]);
 
-    await click(card, button(card, "New plan"));
-    await toReviewWith(card, { spacingCm: 22 });
+    await nextStartWith(card, { spacingCm: 22 });
     await startMowing(card);
 
     expect(startData(hass)[1]).toEqual({ areas: [FRONT], ...heldFields, channel_width: 22 });
@@ -1047,7 +1083,17 @@ describe("what a start sends", () => {
     await openConfirm(card);
     await arm(card);
 
-    await update(card, nextHass(hass, { [FRONT]: "off", [BACK]: "on" }));
+    const front = hass.states[FRONT];
+    const back = hass.states[BACK];
+    if (!front || !back) throw new Error("no area switches");
+    await update(card, {
+      ...hass,
+      states: {
+        ...hass.states,
+        [FRONT]: { ...front, attributes: { ...front.attributes, order: 2 } },
+        [BACK]: { ...back, state: "on", attributes: { ...back.attributes, order: 1 } },
+      },
+    });
     await click(card, button(card, "Start now"));
 
     expect(startData(hass).map((data) => data?.areas)).toEqual([[FRONT]]);
@@ -1158,35 +1204,37 @@ describe("while a start is in flight", () => {
 });
 
 describe("after a start", () => {
-  it("starts the new plan afresh, without the last plan's area picks or edits", async () => {
-    const card = await mount(lubaHass());
-    await click(card, chip(card, "Back lawn"));
-    await toReviewWith(card, { spacingCm: 30 });
-    await startMowing(card);
-
-    await click(card, button(card, "New plan"));
-
-    expect(pressed(card)).toEqual(["1Area Front"]);
-    await click(card, button(card, "Next"));
-    expect(panel(card).settings).toEqual(LUBA_SETTINGS);
-  });
-
-  it("offers a new plan instead of a second start", async () => {
+  it("shows the sent message with Start off, then the running job once the integration reports it", async () => {
     const hass = lubaHass();
     const card = await mount(hass);
     await toReview(card);
     await startMowing(card);
 
     expect(statuses(card)).toContain("Mowing job sent to Luba");
-    expect(hasButton(card, "Start mowing")).toBe(false);
-    const callCount = hass.calls.length;
+    expect(button(card, "Start mowing").disabled).toBe(true);
+    await forceClick(card, button(card, "Start mowing"));
+    expect(confirmation(card)).toBeNull();
 
-    await click(card, button(card, "New plan"));
+    await update(card, withJob(hass, { areas: [111] }));
 
-    expect(currentStep(card)).toBe("1Areas");
-    expect(hass.calls).toHaveLength(callCount);
-    await toReview(card);
     expect(statuses(card).join()).not.toContain("Mowing job sent");
+    expect(button(card, "Apply changes").disabled).toBe(true);
+    expect(textOf(root(card).querySelector(".totals"))).toBe("No changes yet");
+  });
+
+  it("returns to the plan with Start on again if no job arrives within 30 seconds", async () => {
+    const card = await mount(lubaHass());
+    await toReview(card);
+    await startMowing(card);
+
+    await vi.advanceTimersByTimeAsync(29_000);
+    await settle(card);
+    expect(button(card, "Start mowing").disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle(card);
+
+    expect(statuses(card).join()).not.toContain("Mowing job sent");
+    expect(currentStep(card)).toBe("3Review");
     expect(button(card, "Start mowing").disabled).toBe(false);
   });
 
@@ -1201,6 +1249,8 @@ describe("after a start", () => {
 
     await startMowing(card);
     expect(alerts(card)).toEqual(["Couldn't start mowing"]);
+    expect(currentStep(card)).toBe("3Review");
+    expect(rows(card)).toMatchObject({ Areas: "Area Front", Pattern: "Grid", "Path spacing": "28 cm" });
     expect(button(card, "Start mowing").disabled).toBe(false);
 
     fail = false;
@@ -1234,13 +1284,14 @@ describe("after a start", () => {
     await vi.advanceTimersByTimeAsync(30_000);
 
     expect(callsTo(hass, "start_mow")).toEqual([]);
-    expect(new Set(hass.calls.map((call) => call.service))).toEqual(new Set(["get_geojson"]));
+    expect(
+      new Set(hass.calls.filter((call) => call.domain === "mammotion").map((call) => call.service)),
+    ).toEqual(new Set(["get_geojson"]));
   });
 });
 
 describe("during a running job", () => {
-  const mowing = (changes: Parameters<typeof withChanges>[1] = {}) =>
-    lubaHass(withMap, withChanges(lubaEntities(), { [LUBA]: { state: "mowing" }, ...changes }));
+  const mowing = (modifiable = true) => withJob(lubaHass(), { areas: [111] }, modifiable);
 
   /** The settings controls by label, telling which are disabled. */
   const controls = (card: MowPlannerCard): Record<string, boolean> =>
@@ -1292,7 +1343,7 @@ describe("during a running job", () => {
       "Cutting height": false,
       "Edge coverage": true,
       "Obstacle detection": false,
-      "Auto-reverse direction": true,
+      "Auto-reverse direction": false,
       "Start from": false,
       Mow: true,
       "Dump grass": true,
@@ -1308,12 +1359,7 @@ describe("during a running job", () => {
   });
 
   it("locks every setting on a mower that cannot change a running job", async () => {
-    const hass = mowing({
-      "select.luba_cutting_angle_mode": {
-        state: "relative_angle",
-        attributes: { options: ["relative_angle", "absolute_angle"] },
-      },
-    });
+    const hass = mowing(false);
     const card = await mount(hass);
     await toSettings(card);
 
@@ -1390,12 +1436,12 @@ describe("during a running job", () => {
   it("reports a failed change and lets the user retry", async () => {
     let refuse = true;
     const card = await mount(
-      lubaHass(
-        (service, call) => {
+      withJob(
+        lubaHass((service, call) => {
           if (service === "modify_running_job" && refuse) throw new Error("no_running_job");
           return withMap(service, call);
-        },
-        withChanges(lubaEntities(), { [LUBA]: { state: "mowing" } }),
+        }),
+        { areas: [111] },
       ),
     );
     await toSettings(card);
@@ -1416,7 +1462,7 @@ describe("during a running job", () => {
     await click(card, button(card, "Next"));
     await editSettings(card, { speed: 0.5 });
 
-    await update(card, nextHass(hass, { [LUBA]: "mowing" }));
+    await update(card, withJob(hass, { areas: [111] }));
 
     expect(panel(card).settings.speed).toBe(0.4);
     await click(card, button(card, "Next"));
@@ -1433,7 +1479,7 @@ describe("during a running job", () => {
     await arm(card);
     const confirm = button(card, "Apply now");
 
-    await update(card, nextHass(hass, { [LUBA]: "docked" }));
+    await update(card, withJob(hass, null));
     await forceClick(card, confirm);
 
     expect(confirmation(card)).toBeNull();
@@ -1443,9 +1489,11 @@ describe("during a running job", () => {
 
   it("disables everything while the change is in flight and sends it once", async () => {
     const applied = deferred();
-    const hass = lubaHass(
-      (service, call) => (service === "modify_running_job" ? applied.promise : withMap(service, call)),
-      withChanges(lubaEntities(), { [LUBA]: { state: "mowing" } }),
+    const hass = withJob(
+      lubaHass((service, call) =>
+        service === "modify_running_job" ? applied.promise : withMap(service, call),
+      ),
+      { areas: [111] },
     );
     const card = await mount(hass);
     await toSettings(card);
@@ -1667,19 +1715,22 @@ describe("saving settings to the mower's entities", () => {
     expect(panel(card).settings.spacingCm).toBe(28);
   });
 
-  it("keeps saved settings through New plan, resetting only the areas and the step", async () => {
+  it("keeps the saved settings and picks after a start", async () => {
     const hass = saving();
     const card = await mount(hass);
     await click(card, chip(card, "Back lawn"));
     await toReviewWith(card, { spacingCm: 30 });
     await startMowing(card);
 
-    await click(card, button(card, "New plan"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle(card);
 
-    expect(pressed(card)).toEqual(["1Area Front"]);
-    await click(card, button(card, "Next"));
-    expect(panel(card).settings.spacingCm).toBe(30);
-    expect(writes(hass)).toEqual([["number", "set_value", "number.luba_path_spacing", { value: 30 }]]);
+    expect(mapEl(card).selected).toEqual([111, 222]);
+    expect(rows(card)).toMatchObject({ "Path spacing": "30 cm" });
+    expect(writes(hass)).toEqual([
+      ["switch", "turn_on", BACK, {}],
+      ["number", "set_value", "number.luba_path_spacing", { value: 30 }],
+    ]);
   });
 
   it("keeps a setting without an entity in the card", async () => {
@@ -1691,16 +1742,6 @@ describe("saving settings to the mower's entities", () => {
     expect(writes(hass)).toEqual([]);
     await startMowing(card);
     expect(startData(hass)[0]).toMatchObject({ channel_width: 22 });
-  });
-
-  it("writes nothing for an integration that does not report the running job", async () => {
-    const hass = lubaHass();
-    const card = await mount(hass);
-    await click(card, button(card, "Next"));
-    await editSettings(card, { spacingCm: 30 });
-    await settleWrites(card);
-
-    expect(writes(hass)).toEqual([]);
   });
 
   it("writes nothing during a job, where changes go to the running job instead", async () => {
@@ -1854,30 +1895,6 @@ describe("saving area picks to the area switches", () => {
     expect(mapEl(card).selected).toEqual([111]);
   });
 
-  it("keeps the saved picks through New plan", async () => {
-    const hass = ordered(1, null);
-    const card = await mount(hass);
-    await click(card, chip(card, "Back lawn"));
-    await settleWrites(card);
-    await update(card, echo(hass, 1, 2));
-    await toReview(card);
-    await startMowing(card);
-
-    await click(card, button(card, "New plan"));
-
-    expect(mapEl(card).selected).toEqual([111, 222]);
-  });
-
-  it("writes nothing to switches that keep no order", async () => {
-    const hass = lubaHass(withMap, withChanges(lubaEntities(), { [LUBA]: { attributes: IDLE_ATTRIBUTES } }));
-    const card = await mount(hass);
-    await click(card, chip(card, "Back lawn"));
-    await settleWrites(card);
-
-    expect(switchCalls(hass)).toEqual([]);
-    expect(mapEl(card).selected).toEqual([111, 222]);
-  });
-
   it("writes nothing during a job, showing the job's own areas", async () => {
     const hass = ordered(1, null, withMap, {
       state: "mowing",
@@ -1889,6 +1906,52 @@ describe("saving area picks to the area switches", () => {
 
     expect(mapEl(card).selected).toEqual([222]);
     expect(switchCalls(hass)).toEqual([]);
+  });
+});
+
+describe("an integration older than 0.6.25", () => {
+  const notice = "Needs Mammotion integration 0.6.25 or newer";
+
+  it.each([
+    ["the running-job attributes", { [LUBA]: { attributes: { friendly_name: "Luba" } } }],
+    ["the area order", { [FRONT]: { attributes: { friendly_name: "Luba Area Front", hash: 111 } } }],
+  ] as const)(
+    "shows only the notice for a mower without %s, and loads, plans or saves nothing",
+    async (_what, changes) => {
+      const hass = lubaHass(withMap, withChanges(lubaEntities(), changes));
+      const card = await mount(hass);
+
+      expect(alerts(card)).toEqual([notice]);
+      expect(stepButtons(card)).toEqual([]);
+      expect(mapOf(card)).toBeNull();
+      expect(chips(card)).toEqual([]);
+      expect(hass.calls).toEqual([]);
+    },
+  );
+
+  it("shows only the notice without mammotion.plan_route", async () => {
+    const card = await mount({ ...lubaHass(), services: { mammotion: { start_mow: {} } } });
+
+    expect(alerts(card)).toEqual([notice]);
+    expect(stepButtons(card)).toEqual([]);
+  });
+
+  it("keeps the mower picker so another mower can be chosen", async () => {
+    const hass = makeHass(
+      [
+        ...withChanges(lubaEntities(), { [LUBA]: { attributes: { friendly_name: "Luba" } } }),
+        ...lubaEntities("dev2", "yuka"),
+      ],
+      [device("dev1", "Luba"), device("dev2", "Yuka")],
+      withMap,
+    );
+    const card = await mount(hass);
+    expect(alerts(card)).toEqual([notice]);
+
+    await pick(card, YUKA);
+
+    expect(alerts(card)).toEqual([]);
+    expect(stepButtons(card)).toHaveLength(3);
   });
 });
 
@@ -2029,13 +2092,6 @@ describe("exact route", () => {
 
   it("is not offered by default", async () => {
     const card = await mount(lubaHass());
-    await toReview(card);
-    expect(hasButton(card, "Get route from mower")).toBe(false);
-  });
-
-  it("is not offered by an integration without mammotion.plan_route", async () => {
-    const hass = { ...routeHass(ROUTE), services: { mammotion: { start_mow: {} } } };
-    const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
     expect(hasButton(card, "Get route from mower")).toBe(false);
   });
@@ -2289,15 +2345,6 @@ describe("optimal direction from a plan", () => {
     await findOptimal(card);
 
     expect(status(card)).toBe("Luba did not share the route it planned. Find optimal direction");
-  });
-
-  it("says a newer integration is needed instead of offering it on one without mammotion.plan_route", async () => {
-    const hass = { ...optimalHass(plannedRoute(60)), services: { mammotion: { start_mow: {} } } };
-    const card = await mount(hass);
-    await click(card, button(card, "Next"));
-
-    expect(status(card)).toBe("Finding it needs Mammotion integration 0.6.24 or newer");
-    expect(mapEl(card).note).toBe("Preview is approximate: the mower picks the final direction");
   });
 
   it("never asks a busy mower", async () => {

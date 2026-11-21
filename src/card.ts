@@ -22,7 +22,6 @@ import { previewArea } from "./geo/preview";
 import { projectMap, projectPosition } from "./geo/project";
 import {
   fetchMap,
-  canPlanRoute,
   findMowers,
   modifyJobData,
   modifyRunningJob,
@@ -76,6 +75,8 @@ const IDLE = { status: "idle" } as const;
 const KNOWN_STATES = ["mowing", "paused", "returning", "docked", "idle", "error"] as const;
 const ACTIVE_STATES: readonly string[] = ["mowing", "paused", "returning"];
 const OFFLINE_STATES: readonly string[] = ["unavailable", "unknown"];
+/** How long the sent message stays, and Start stays off, while the job the card started has not arrived. */
+const SENT_HOLD_MS = 30_000;
 /** Keeps a double tap on Start from also confirming it. */
 const CONFIRM_ARM_MS = 600;
 
@@ -153,6 +154,7 @@ export class MowPlannerCard extends LitElement {
   private mowerSnapshot = "";
   private previewKey = "";
   private armTimer?: ReturnType<typeof setTimeout>;
+  private sentTimer?: ReturnType<typeof setTimeout>;
   private latestMapLoad = 0;
   private hadFocus = false;
   private jobMode = false;
@@ -203,6 +205,7 @@ export class MowPlannerCard extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     clearTimeout(this.armTimer);
+    clearTimeout(this.sentTimer);
     if (this.request.status === "confirming") this.request = IDLE;
   }
 
@@ -234,8 +237,7 @@ export class MowPlannerCard extends LitElement {
 
   private get selectedAreas(): readonly AreaSwitch[] {
     const areas = this.mower?.areas ?? [];
-    const hashes = this.job?.areas ?? this.pickedHashes ?? this.mower?.savedAreas;
-    if (!hashes) return areas.filter((area) => area.on);
+    const hashes = this.job?.areas ?? this.pickedHashes ?? this.mower?.savedAreas ?? [];
     return hashes.flatMap((hash) => areas.find((area) => area.hash === hash) ?? []);
   }
 
@@ -257,18 +259,11 @@ export class MowPlannerCard extends LitElement {
     return this.directions.get(this.selectedAreas[0]?.hash ?? Number.NaN) ?? 0;
   }
 
-  /** The integration plans a route and returns it only from the version with `mammotion.plan_route`. */
-  private get canPlan(): boolean {
-    return Boolean(this.latestHass && canPlanRoute(this.latestHass));
-  }
-
   private get optimalState(): OptimalState | undefined {
     const selected = this.selectedAreas;
     if (this.findingOptimal === "finding") return "finding";
     if (selected.length > 0 && selected.every((area) => this.directions.has(area.hash))) return "found";
-    if (this.map.status !== "ready") return undefined;
-    if (!this.canPlan) return "unsupported";
-    if (this.refuses("optimal")) return undefined;
+    if (this.map.status !== "ready" || this.refuses("optimal")) return undefined;
     return this.findingOptimal === "failed" ? "failed" : "approximate";
   }
 
@@ -298,8 +293,8 @@ export class MowPlannerCard extends LitElement {
   private refuses(kind: PlanKind): boolean {
     if (this.blocker) return true;
     if (kind === "modify") return !this.job || this.jobEdits.length === 0;
-    if (kind === "start") return Boolean(this.job);
-    return Boolean(this.job) || this.active || !this.canPlan;
+    if (kind === "start") return Boolean(this.job) || this.request.status === "sent";
+    return Boolean(this.job) || this.active;
   }
 
   private get pathLengthM(): number {
@@ -309,6 +304,7 @@ export class MowPlannerCard extends LitElement {
   private get blocker(): StringKey | undefined {
     const { mower, settings } = this;
     if (!mower || OFFLINE_STATES.includes(mower.state)) return "warn.unavailable";
+    if (!mower.supported) return "warn.unsupported";
     if (mower.runningJob) return undefined;
     if (this.selectedAreas.length === 0) return "warn.no_area";
     if (settings?.pattern !== "no_grid") return undefined;
@@ -327,9 +323,11 @@ export class MowPlannerCard extends LitElement {
   protected override willUpdate(changed: PropertyValues): void {
     this.hadFocus = this.matches(":focus-within");
     if (changed.has("mowerId")) {
+      this.step = "areas";
       this.edits = {};
       this.pickedHashes = undefined;
-      this.resetPlan();
+      this.findingOptimal = "idle";
+      this.forgetOutcome();
     }
     const jobMode = Boolean(this.job);
     if (jobMode !== this.jobMode) {
@@ -338,6 +336,8 @@ export class MowPlannerCard extends LitElement {
       this.writer.cancel();
       this.areaWriter.cancel();
       this.edits = {};
+      // The job the card started has arrived, so the card now shows it instead of the sent message.
+      if (jobMode && this.request.status === "sent") this.request = IDLE;
     }
     if (changed.has("mower")) {
       this.dropSavedEdits();
@@ -354,17 +354,6 @@ export class MowPlannerCard extends LitElement {
     if (moved && this.hadFocus && !this.shadowRoot?.activeElement) {
       this.shadowRoot?.querySelector<HTMLElement>("[data-focus]")?.focus();
     }
-  }
-
-  /** Keeps the settings being saved: they are the mower's own now, not part of the plan. */
-  private resetPlan(): void {
-    this.step = "areas";
-    if (!this.savesAreas) this.pickedHashes = undefined;
-    this.edits = Object.fromEntries(
-      Object.entries(this.edits).filter(([name]) => this.saves(name as SettingName)),
-    );
-    this.findingOptimal = "idle";
-    this.forgetOutcome();
   }
 
   private forgetOutcome(): void {
@@ -395,7 +384,7 @@ export class MowPlannerCard extends LitElement {
   private async loadMap(refresh = false): Promise<void> {
     const { mowerId, latestHass: hass } = this;
     const areas = this.mower?.areas;
-    if (!mowerId || !hass || !areas) return;
+    if (!mowerId || !hass || !areas || !this.mower?.supported) return;
     const loaded = refresh ? undefined : this.loadedMaps.get(mowerId);
     if (refresh) this.forgetDirections(mowerId);
     if (loaded) {
@@ -431,23 +420,19 @@ export class MowPlannerCard extends LitElement {
     );
   }
 
-  /** Picks areas in mowing order, saving them to the area switches where the integration keeps the order. */
+  /** Picks areas in mowing order and saves them to the area switches. */
   private pick(hashes: readonly number[]): void {
     this.pickedHashes = hashes;
     this.saveError = undefined;
-    if (this.savesAreas && this.mowerId) this.areaWriter.write(this.mowerId, hashes);
+    if (this.mowerId) this.areaWriter.write(this.mowerId, hashes);
     this.findingOptimal = "idle";
     this.forgetOutcome();
-  }
-
-  private get savesAreas(): boolean {
-    return !this.job && this.mower?.savedAreas !== undefined;
   }
 
   /** Follows the switches again once they hold the picks and nothing is left to write. */
   private dropSavedPicks(): void {
     const { pickedHashes, mower, mowerId } = this;
-    if (!pickedHashes || !mower?.savedAreas || !mowerId || this.areaWriter.pending(mowerId)) return;
+    if (!pickedHashes || !mower || !mowerId || this.areaWriter.pending(mowerId)) return;
     if (pickedHashes.join() === mower.savedAreas.join()) this.pickedHashes = undefined;
   }
 
@@ -480,16 +465,15 @@ export class MowPlannerCard extends LitElement {
 
   /** Whether a change to `name` is saved to its planning entity rather than kept in the card. */
   private saves(name: SettingName): boolean {
-    return !this.job && Boolean(this.mower?.settingEntities?.[name]);
+    return !this.job && Boolean(this.mower?.settingEntities[name]);
   }
 
   /** Shows the user's value until its entity holds it, so an older state never flips a control back. */
   private dropSavedEdits(): void {
     const { mower } = this;
-    const entities = mower?.settingEntities;
-    if (!mower || !entities || this.job) return;
+    if (!mower || this.job) return;
     const kept = Object.entries(this.edits).filter(([name, value]) => {
-      const entityId = entities[name as SettingName];
+      const entityId = mower.settingEntities[name as SettingName];
       return !entityId || this.writer.pending(entityId) || mower.settings[name as SettingName] !== value;
     });
     if (kept.length < Object.keys(this.edits).length) this.edits = Object.fromEntries(kept);
@@ -586,6 +570,13 @@ export class MowPlannerCard extends LitElement {
       sent = false;
     }
     this.request = { status: sent ? "sent" : "failed", plan };
+    // The running job normally replaces the sent message; if it is slow to arrive, the plan comes back.
+    if (sent && plan.kind === "start") {
+      clearTimeout(this.sentTimer);
+      this.sentTimer = setTimeout(() => {
+        if (this.request.status === "sent") this.request = IDLE;
+      }, SENT_HOLD_MS);
+    }
   }
 
   /** Plans on the mower and reads that plan's own route: drawn for `route`, its directions kept for `optimal`. */
@@ -689,6 +680,14 @@ export class MowPlannerCard extends LitElement {
         <ha-card>
           ${this.mowerIds.length > 1 ? html`<header>${this.renderMowerPicker()}</header>` : nothing}
           <p class="message" role="status">${this.t("mower.none")}</p>
+        </ha-card>
+      `;
+    }
+    if (!mower.supported) {
+      return html`
+        <ha-card>
+          ${this.renderHeader(mower)}
+          <p class="message" role="alert">${this.t("warn.unsupported")}</p>
         </ha-card>
       `;
     }
@@ -947,7 +946,6 @@ export class MowPlannerCard extends LitElement {
     ];
     const canFetchRoute =
       this.config?.exact_route &&
-      this.canPlan &&
       this.map.status === "ready" &&
       !this.blocker &&
       !ACTIVE_STATES.includes(mower.state) &&
@@ -1110,44 +1108,31 @@ export class MowPlannerCard extends LitElement {
                 >
                   ${this.t("action.next")}
                 </button>`
-              : outcome && request.status === "sent" && !modified
+              : this.job
                 ? html`<button
                     class="primary"
                     data-focus
+                    ?disabled=${
+                      Boolean(blocker) || this.busy || request.status === "sent" || this.jobEdits.length === 0
+                    }
                     @click=${() => {
-                      this.resetPlan();
+                      this.askToConfirm("modify");
                     }}
                   >
-                    ${this.t("action.new_plan")}
+                    ${this.renderIcon(mdiCheck)}
+                    ${this.t(request.status === "sending" ? "action.applying" : "action.apply")}
                   </button>`
-                : this.job
-                  ? html`<button
-                      class="primary"
-                      data-focus
-                      ?disabled=${
-                        Boolean(blocker) ||
-                        this.busy ||
-                        request.status === "sent" ||
-                        this.jobEdits.length === 0
-                      }
-                      @click=${() => {
-                        this.askToConfirm("modify");
-                      }}
-                    >
-                      ${this.renderIcon(mdiCheck)}
-                      ${this.t(request.status === "sending" ? "action.applying" : "action.apply")}
-                    </button>`
-                  : html`<button
-                      class="primary"
-                      data-focus
-                      ?disabled=${Boolean(blocker) || this.busy}
-                      @click=${() => {
-                        this.askToConfirm("start");
-                      }}
-                    >
-                      ${this.renderIcon(mdiPlay)}
-                      ${this.t(request.status === "sending" ? "action.starting" : "action.start")}
-                    </button>`
+                : html`<button
+                    class="primary"
+                    data-focus
+                    ?disabled=${Boolean(blocker) || this.busy || request.status === "sent"}
+                    @click=${() => {
+                      this.askToConfirm("start");
+                    }}
+                  >
+                    ${this.renderIcon(mdiPlay)}
+                    ${this.t(request.status === "sending" ? "action.starting" : "action.start")}
+                  </button>`
           }
         </div>
       </footer>

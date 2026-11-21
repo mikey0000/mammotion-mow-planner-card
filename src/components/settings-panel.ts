@@ -31,7 +31,7 @@ const angleModeIcons: Readonly<Record<AngleMode, string>> = {
 const EDGE_CHOICES = [0, 0.5] as const;
 
 /** Where the Optimal direction stands: guessed by the card, being asked of the mower, or taken from its plan. */
-export type OptimalState = "approximate" | "finding" | "found" | "failed" | "unsupported";
+export type OptimalState = "approximate" | "finding" | "found" | "failed";
 
 const SWITCH_LABELS: Readonly<Record<SwitchSetting, StringKey>> = {
   autoChangeDirection: "settings.auto_change_direction",

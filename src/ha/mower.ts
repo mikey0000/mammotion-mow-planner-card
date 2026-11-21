@@ -47,13 +47,15 @@ export interface Mower {
   readonly heldSettings: readonly SettingName[];
   /** Present while a job is under way. */
   readonly runningJob?: RunningJob;
+  /** The planning entity of each setting that has one, by entity id; changes are saved there. */
+  readonly settingEntities: Partial<Record<SettingName, string>>;
+  /** The areas the integration has picked, in mowing order. */
+  readonly savedAreas: readonly number[];
   /**
-   * The planning entity of each setting that has one, by entity id. Only an integration that reports the
-   * running job is listed: its setters touch the mower only during a job, which the card can then tell.
+   * Whether the integration is 0.6.25 or newer: it reports the running job, keeps the areas' mowing
+   * order and plans routes, all of which the card relies on.
    */
-  readonly settingEntities?: Partial<Record<SettingName, string>>;
-  /** The areas the integration has picked, in mowing order; present when its area switches keep an order. */
-  readonly savedAreas?: readonly number[];
+  readonly supported: boolean;
 }
 
 /** An entity service call that stores a setting in its planning entity. */
@@ -112,8 +114,6 @@ const SWITCH_DEFAULTS: Readonly<Record<SwitchSetting, boolean>> = {
   cutEdges: false,
 };
 
-const ACTIVE_STATES: readonly string[] = ["mowing", "paused", "returning"];
-
 /** What `mammotion.modify_running_job` takes. */
 const RUNNING_JOB_SETTINGS: readonly SettingName[] = [
   "pattern",
@@ -125,9 +125,6 @@ const RUNNING_JOB_SETTINGS: readonly SettingName[] = [
   "startProgress",
   "autoChangeDirection",
 ];
-
-/** An integration without the running-job attributes resets auto-reverse from the job before sending. */
-const LEGACY_RUNNING_JOB_SETTINGS = RUNNING_JOB_SETTINGS.filter((name) => name !== "autoChangeDirection");
 
 /** Each setting's planning entity, by domain and translation key. */
 const SETTING_ENTITIES: Readonly<Record<SettingName, readonly ["select" | "number" | "switch", string]>> = {
@@ -371,19 +368,6 @@ type JobFields = Readonly<Record<string, unknown>>;
 
 const isJob = (value: unknown): value is JobFields => typeof value === "object" && value !== null;
 
-/** For an integration without the `running_job` attributes: its own test reads values no entity has. */
-function approximateRunningJob(
-  state: string,
-  progress?: HassEntity,
-  angleMode?: HassEntity,
-): RunningJob | undefined {
-  if (!ACTIVE_STATES.includes(state) || stateNumber(progress) === 100) return undefined;
-  // Random angle is missing only on the original Luba, whose running job the integration refuses to change.
-  return {
-    changeable: offered(angleMode, ANGLE_MODES).includes("random_angle") ? LEGACY_RUNNING_JOB_SETTINGS : [],
-  };
-}
-
 function reportedRunningJob(job: JobFields, modifiable: boolean): RunningJob {
   const areas = Array.isArray(job.areas)
     ? job.areas.filter((hash): hash is number => finite(hash) !== undefined)
@@ -464,20 +448,13 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
   };
   const limits = readLimits(lookups);
   const { running_job: job, running_job_modifiable: modifiable } = mower.attributes;
-  const reported = typeof modifiable === "boolean";
-  const runningJob = !reported
-    ? approximateRunningJob(mower.state, find("sensor", "progress"), lookups.select("cutting_angle_mode"))
-    : isJob(job)
-      ? reportedRunningJob(job, modifiable)
-      : undefined;
+  const runningJob = isJob(job) ? reportedRunningJob(job, modifiable === true) : undefined;
   const { settings, heldSettings } = readSettings(lookups, limits);
   const settingEntities = Object.fromEntries(
-    reported
-      ? (Object.keys(SETTING_ENTITIES) as SettingName[]).flatMap((name) => {
-          const entity = available(find(...SETTING_ENTITIES[name]));
-          return entity ? [[name, entity.entity_id]] : [];
-        })
-      : [],
+    (Object.keys(SETTING_ENTITIES) as SettingName[]).flatMap((name) => {
+      const entity = available(find(...SETTING_ENTITIES[name]));
+      return entity ? [[name, entity.entity_id]] : [];
+    }),
   );
   const position = readPosition(find("device_tracker", "device_tracker"));
   const battery = stateNumber(
@@ -486,10 +463,10 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
     )?.state,
   );
   const areas = readAreas(entities, deviceName(hass, entityId));
-  const ordered =
-    reported &&
-    areas.length > 0 &&
-    areas.every((area) => "order" in (hass.states[area.entityId]?.attributes ?? {}));
+  const supported =
+    typeof modifiable === "boolean" &&
+    areas.every((area) => "order" in (hass.states[area.entityId]?.attributes ?? {})) &&
+    Boolean(hass.services?.mammotion?.plan_route);
   const savedAreas = areas
     .filter((area) => area.on && area.order !== undefined)
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
@@ -502,11 +479,12 @@ export function readMower(hass: HomeAssistant, entityId: string): Mower | undefi
     ...(position && { position }),
     ...(battery !== undefined && { battery }),
     limits,
-    settings: { ...settings, ...(reported && isJob(job) && jobSettings(job, limits)) },
+    settings: { ...settings, ...(isJob(job) && jobSettings(job, limits)) },
     heldSettings,
     ...(runningJob && { runningJob }),
-    ...(Object.keys(settingEntities).length > 0 && { settingEntities }),
-    ...(ordered && { savedAreas }),
+    settingEntities,
+    savedAreas,
+    supported,
   };
 }
 
@@ -564,7 +542,7 @@ function optionOf(name: SettingName, value: unknown, limits: SettingLimits): str
 
 /** The call that stores `value` in the setting's planning entity, or undefined when it has none. */
 export function settingWrite(mower: Mower, name: SettingName, value: unknown): SettingWrite | undefined {
-  const entityId = mower.settingEntities?.[name];
+  const entityId = mower.settingEntities[name];
   if (!entityId || value === undefined) return undefined;
   const [domain] = SETTING_ENTITIES[name];
   if (domain === "switch") return { entityId, domain, service: value ? "turn_on" : "turn_off", data: {} };
@@ -582,7 +560,7 @@ export function settingWrite(mower: Mower, name: SettingName, value: unknown): S
  * then the rest of `target` is turned on one by one.
  */
 export function areaWrites(mower: Mower, target: readonly number[]): SettingWrite[] {
-  const current = mower.savedAreas ?? [];
+  const current = mower.savedAreas;
   const kept = current.reduce((count, hash) => (hash === target[count] ? count + 1 : count), 0);
   const steps = [
     ...current.filter((hash) => !target.slice(0, kept).includes(hash)).map((hash) => [hash, false] as const),
@@ -638,9 +616,6 @@ export async function fetchMap(
 ): Promise<FeatureCollection | undefined> {
   return asFeatures(await responseOf(hass, "get_geojson", entityId));
 }
-
-/** Whether the integration can plan a route and hand it back, which `mammotion.plan_route` brought. */
-export const canPlanRoute = (hass: HomeAssistant): boolean => Boolean(hass.services?.mammotion?.plan_route);
 
 const messageOf = (error: unknown): string =>
   typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"

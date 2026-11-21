@@ -42,7 +42,6 @@ export const de: Record<keyof typeof en, string> = {
   "action.cancel": "Abbrechen",
   "action.confirm_start": "Jetzt starten",
   "action.confirm_route": "Route abrufen",
-  "action.new_plan": "Neuer Plan",
   "route.confirm": "{name} diese Route planen lassen? Das Mähen startet nicht.",
   "start.confirm": "{name} jetzt zum Mähen schicken ({areas})?",
   "action.starting": "Wird gestartet…",
@@ -135,6 +134,6 @@ export const de: Record<keyof typeof en, string> = {
     "{name} diese Flächen planen lassen, um seine Richtung zu ermitteln? Das Mähen startet nicht.",
   "action.confirm_optimal": "Mäher fragen",
   "review.mower_value": "Einstellung des Mähers",
-  "optimal.unsupported": "Dafür ist die Mammotion-Integration 0.6.24 oder neuer nötig",
   "save.failed": "{setting} konnte nicht gespeichert werden",
+  "warn.unsupported": "Benötigt die Mammotion-Integration 0.6.25 oder neuer",
 };

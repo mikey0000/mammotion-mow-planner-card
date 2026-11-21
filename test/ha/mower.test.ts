@@ -3,7 +3,6 @@ import type { FeatureCollection } from "geojson";
 import {
   areaWrites,
   fetchMap,
-  canPlanRoute,
   findMowers,
   modifyJobData,
   modifyRunningJob,
@@ -45,6 +44,28 @@ const PLANNING_IDS = [
 function readLuba(changes: Parameters<typeof withChanges>[1] = {}) {
   return readMower(makeHass(withChanges(lubaEntities(), changes), [LUBA]), "lawn_mower.luba");
 }
+
+/** The setting each planning entity of the fixture holds. */
+const SETTING_OF: Record<string, string> = {
+  "select.luba_channel_mode": "pattern",
+  "select.luba_cutting_angle_mode": "angleMode",
+  "select.luba_mowing_laps": "perimeterLaps",
+  "select.luba_obstacle_laps": "obstacleLaps",
+  "select.luba_border_mode": "mowOrder",
+  "number.luba_cutting_angle": "angle",
+  "number.luba_toward_included_angle": "crossAngle",
+  "number.luba_path_spacing": "spacingCm",
+  "number.luba_working_speed": "speed",
+  "number.luba_blade_height": "bladeHeight",
+  "number.luba_ride_boundary_distance": "edgeDistance",
+  "select.luba_bypass_mode": "obstacleDetection",
+  "number.luba_start_progress": "startProgress",
+  "number.luba_dumping_interval": "dumpInterval",
+  "switch.luba_auto_change_direction": "autoChangeDirection",
+  "switch.luba_is_mow": "cutGrass",
+  "switch.luba_is_dump": "dumpGrass",
+  "switch.luba_is_edge": "cutEdges",
+};
 
 const FALLBACK_LIMITS = {
   patterns: ["single_grid", "double_grid", "segment_grid", "no_grid"],
@@ -126,7 +147,7 @@ describe("readMower", () => {
       name: "Luba",
       state: "docked",
       areas: [
-        { entityId: "switch.luba_area_front", hash: 111, name: "Area Front", on: true },
+        { entityId: "switch.luba_area_front", hash: 111, name: "Area Front", on: true, order: 1 },
         { entityId: "switch.luba_back_lawn", hash: 222, name: "Back lawn", on: false },
       ],
       position: { lon: -0.1, lat: 51.5, headingDeg: 45 },
@@ -168,6 +189,11 @@ describe("readMower", () => {
         cutEdges: true,
       },
       heldSettings: ALL_HELD,
+      settingEntities: Object.fromEntries(
+        PLANNING_IDS.map((id): [string, string] => [SETTING_OF[id] ?? id, id]),
+      ),
+      savedAreas: [111],
+      supported: true,
     });
   });
 
@@ -227,6 +253,9 @@ describe("readMower", () => {
       limits: FALLBACK_LIMITS,
       settings: FALLBACK_SETTINGS,
       heldSettings: [],
+      settingEntities: {},
+      savedAreas: [],
+      supported: false,
     });
   });
 
@@ -417,62 +446,31 @@ describe("readMower switches", () => {
   });
 });
 
-describe("readMower running job without the integration's running-job attributes", () => {
-  const CHANGEABLE = [
-    "pattern",
-    "spacingCm",
-    "obstacleLaps",
-    "speed",
-    "bladeHeight",
-    "obstacleDetection",
-    "startProgress",
-  ];
-
-  it.each(["mowing", "paused", "returning"])(
-    "lists what can change on a %s job, less auto-reverse",
-    (state) => {
-      expect(readLuba({ "lawn_mower.luba": { state } })?.runningJob).toEqual({ changeable: CHANGEABLE });
-    },
-  );
-
-  it.each(["docked", "idle", "error", "unavailable"])("has no running job while %s", (state) => {
-    expect(readLuba({ "lawn_mower.luba": { state } })).not.toHaveProperty("runningJob");
+describe("readMower integration support", () => {
+  it("is supported with the running-job attributes, the area order and mammotion.plan_route", () => {
+    expect(readLuba()?.supported).toBe(true);
   });
 
-  it("has no running job once the job reports 100 %, such as on the way home", () => {
-    const mower = readLuba({
-      "lawn_mower.luba": { state: "returning" },
-      "sensor.luba_progress": { state: "100" },
-    });
-
-    expect(mower).not.toHaveProperty("runningJob");
+  it.each([
+    ["the running-job attributes", { "lawn_mower.luba": { attributes: { friendly_name: "Luba" } } }],
+    [
+      "the area order",
+      { "switch.luba_back_lawn": { attributes: { friendly_name: "Luba Back lawn", hash: 222 } } },
+    ],
+  ] as const)("is not supported without %s", (_what, changes) => {
+    expect(readLuba(changes)?.supported).toBe(false);
   });
 
-  it("counts an active job as running without a progress sensor", () => {
-    const mower = readLuba({ "lawn_mower.luba": { state: "mowing" }, "sensor.luba_progress": null });
+  it("is not supported without mammotion.plan_route", () => {
+    const hass = makeHass(lubaEntities(), [LUBA]);
 
-    expect(mower?.runningJob?.changeable).toEqual(CHANGEABLE);
+    expect(readMower({ ...hass, services: { mammotion: {} } }, "lawn_mower.luba")?.supported).toBe(false);
   });
 
-  it("allows no change on a mower without random angle, the original Luba", () => {
-    const mower = readLuba({
-      "lawn_mower.luba": { state: "mowing" },
-      "select.luba_cutting_angle_mode": {
-        state: "relative_angle",
-        attributes: { options: ["relative_angle", "absolute_angle"] },
-      },
-    });
-
-    expect(mower?.runningJob).toEqual({ changeable: [] });
-  });
-
-  it("allows no change when the angle mode cannot be read", () => {
-    const mower = readLuba({
-      "lawn_mower.luba": { state: "mowing" },
-      "select.luba_cutting_angle_mode": null,
-    });
-
-    expect(mower?.runningJob).toEqual({ changeable: [] });
+  it("leaves out an unavailable entity from the ones changes are saved to", () => {
+    expect(readLuba({ "number.luba_path_spacing": UNAVAILABLE })?.settingEntities).not.toHaveProperty(
+      "spacingCm",
+    );
   });
 });
 
@@ -918,16 +916,6 @@ describe("modifyRunningJob", () => {
   });
 });
 
-describe("canPlanRoute", () => {
-  it("needs an integration that registers mammotion.plan_route", () => {
-    const hass = makeHass([]);
-
-    expect(canPlanRoute(hass)).toBe(true);
-    expect(canPlanRoute({ ...hass, services: { mammotion: { start_mow: {} } } })).toBe(false);
-    expect(canPlanRoute({ ...hass, services: undefined })).toBe(false);
-  });
-});
-
 describe("planRoute", () => {
   const data = { areas: ["switch.a"], channel_mode: 0 };
 
@@ -981,19 +969,6 @@ describe("settingWrite", () => {
       },
       ...changes,
     });
-
-  it("lists the planning entities only for an integration that reports the running job", () => {
-    expect(readLuba()).not.toHaveProperty("settingEntities");
-    expect(reporting()?.settingEntities).toMatchObject({
-      pattern: "select.luba_channel_mode",
-      angle: "number.luba_cutting_angle",
-      cutGrass: "switch.luba_is_mow",
-      dumpInterval: "number.luba_dumping_interval",
-    });
-    expect(
-      reporting({ "number.luba_path_spacing": { state: "unavailable" } })?.settingEntities,
-    ).not.toHaveProperty("spacingCm");
-  });
 
   it.each([
     ["pattern", "double_grid", "select.luba_channel_mode", "select_option", { option: "double_grid" }],
@@ -1084,11 +1059,6 @@ describe("saved areas", () => {
     expect(ordered(2, 1)?.savedAreas).toEqual([222, 111]);
     expect(ordered(1, null)?.savedAreas).toEqual([111]);
     expect(ordered(null, null)?.savedAreas).toEqual([]);
-  });
-
-  it("has no saved areas when the switches keep no order or the running job is not reported", () => {
-    expect(readLuba()).not.toHaveProperty("savedAreas");
-    expect(ordered(1, 2, { friendly_name: "Luba" })).not.toHaveProperty("savedAreas");
   });
 });
 
