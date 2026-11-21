@@ -131,4 +131,5 @@ export const en = {
     "Ask {name} to plan these areas to learn its direction? It won't start mowing, but a paused job would be dropped.",
   "action.confirm_optimal": "Ask mower",
   "review.mower_value": "Mower's own setting",
+  "optimal.unsupported": "Finding it needs Mammotion integration 0.6.24 or newer",
 };

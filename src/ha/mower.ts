@@ -483,13 +483,8 @@ export function startMowData(
   settings: MowSettings,
   names: readonly SettingName[],
   areaEntityIds: readonly string[],
-  planOnly = false,
 ): Record<string, unknown> {
-  return {
-    areas: [...areaEntityIds],
-    ...serviceFields(settings, names),
-    ...(planOnly && { plan_only: true }),
-  };
+  return { areas: [...areaEntityIds], ...serviceFields(settings, names) };
 }
 
 /** `mammotion.modify_running_job` service data; the job keeps its own value for every setting left out. */
@@ -501,11 +496,12 @@ async function fetchFeatures(
   hass: HomeAssistant,
   service: string,
   entityId: string,
+  data: Record<string, unknown> = {},
 ): Promise<FeatureCollection | undefined> {
   const { response } = await hass.callService<{ features?: unknown }>(
     "mammotion",
     service,
-    {},
+    data,
     { entity_id: entityId },
     false,
     true,
@@ -519,17 +515,31 @@ export function fetchMap(hass: HomeAssistant, entityId: string): Promise<Feature
   return fetchFeatures(hass, "get_geojson", entityId);
 }
 
-/** The mower's own planned route, once it has one; undefined otherwise. */
-export function fetchPlannedRoute(
+/** Whether the integration can plan a route and hand it back, which `mammotion.plan_route` brought. */
+export const canPlanRoute = (hass: HomeAssistant): boolean => Boolean(hass.services?.mammotion?.plan_route);
+
+const messageOf = (error: unknown): string =>
+  typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
+    ? error.message
+    : "";
+
+/**
+ * Plans `data` (`start_mow` fields) without starting it and returns that plan's own route.
+ * Rejects with the integration's message, empty when it gave none, if it refuses or gets no route.
+ */
+export async function planRoute(
   hass: HomeAssistant,
   entityId: string,
-): Promise<FeatureCollection | undefined> {
-  return fetchFeatures(hass, "get_mow_path_geojson", entityId);
-}
-
-/** Asks the mower to upload the route it last planned, so `fetchPlannedRoute` can return it. */
-export async function requestPlannedRoute(hass: HomeAssistant, entityId: string): Promise<void> {
-  await hass.callService("mammotion", "fetch_mow_path", {}, { entity_id: entityId }, false, false);
+  data: Record<string, unknown>,
+): Promise<FeatureCollection> {
+  let route: FeatureCollection | undefined;
+  try {
+    route = await fetchFeatures(hass, "plan_route", entityId, data);
+  } catch (error) {
+    throw new Error(messageOf(error), { cause: error });
+  }
+  if (!route) throw new Error("");
+  return route;
 }
 
 export async function modifyRunningJob(

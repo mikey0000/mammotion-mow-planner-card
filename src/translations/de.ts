@@ -136,4 +136,5 @@ export const de: Record<keyof typeof en, string> = {
     "{name} diese Flächen planen lassen, um seine Richtung zu ermitteln? Das Mähen startet nicht, ein pausierter Auftrag würde aber verworfen.",
   "action.confirm_optimal": "Mäher fragen",
   "review.mower_value": "Einstellung des Mähers",
+  "optimal.unsupported": "Dafür ist die Mammotion-Integration 0.6.24 oder neuer nötig",
 };

@@ -31,7 +31,7 @@ const angleModeIcons: Readonly<Record<AngleMode, string>> = {
 const EDGE_CHOICES = [0, 0.5] as const;
 
 /** Where the Optimal direction stands: guessed by the card, being asked of the mower, or taken from its plan. */
-export type OptimalState = "approximate" | "finding" | "found" | "failed";
+export type OptimalState = "approximate" | "finding" | "found" | "failed" | "unsupported";
 
 const SWITCH_LABELS: Readonly<Record<SwitchSetting, StringKey>> = {
   autoChangeDirection: "settings.auto_change_direction",
@@ -54,6 +54,8 @@ export class MowSettingsPanel extends LitElement {
   @property({ attribute: false }) angleBase = 0;
   /** Offers finding the Optimal direction from a plan when set; fires `find-optimal`. */
   @property({ attribute: false }) optimal?: OptimalState;
+  /** The integration's reason for a failed attempt, shown instead of the generic one. */
+  @property({ attribute: false }) optimalError?: string;
 
   static override styles = [
     controlStyles,
@@ -281,7 +283,7 @@ export class MowSettingsPanel extends LitElement {
     const { optimal } = this;
     if (!optimal) return nothing;
     return html`<p class="optimal secondary" role="status">
-      ${this.t(`optimal.${optimal}`)}
+      ${optimal === "failed" && this.optimalError ? this.optimalError : this.t(`optimal.${optimal}`)}
       ${
         optimal === "approximate" || optimal === "failed"
           ? html`<button

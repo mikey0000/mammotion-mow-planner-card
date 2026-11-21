@@ -2,17 +2,18 @@ import { describe, expect, it } from "vitest";
 import type { FeatureCollection } from "geojson";
 import {
   fetchMap,
-  fetchPlannedRoute,
+  canPlanRoute,
   findMowers,
   modifyJobData,
   modifyRunningJob,
   mowerName,
+  planRoute,
   readMower,
   startMow,
   startMowData,
 } from "../../src/ha/mower";
 import type { MowSettings } from "../../src/model";
-import { device, lubaEntities, makeHass, withChanges } from "./_helpers";
+import { device, lubaEntities, makeHass, serviceError, withChanges } from "./_helpers";
 
 const LUBA = device("dev1", "Luba");
 const UNAVAILABLE = { state: "unavailable", attributes: {} };
@@ -706,12 +707,11 @@ describe("startMowData", () => {
     expect(startMowData({ ...settings, angleMode }, ["angleMode"], areas).toward_mode).toBe(code);
   });
 
-  it("rounds blade height and spacing, and adds plan_only when asked", () => {
+  it("rounds blade height and spacing", () => {
     const data = startMowData(
       { ...settings, mowOrder: "grid_first", bladeHeight: 55.4, edgeDistance: 0.5, spacingCm: 12.6 },
       all,
       areas,
-      true,
     );
 
     expect(data).toMatchObject({
@@ -719,8 +719,8 @@ describe("startMowData", () => {
       blade_height: 55,
       ride_boundary_distance: 0.5,
       channel_width: 13,
-      plan_only: true,
     });
+    expect(data).not.toHaveProperty("plan_only");
   });
 
   it("leaves out a named optional setting the mower does not have", () => {
@@ -823,10 +823,7 @@ const COLLECTION: FeatureCollection = {
   features: [{ type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: {} }],
 };
 
-describe.each([
-  ["fetchMap", fetchMap, "get_geojson"],
-  ["fetchPlannedRoute", fetchPlannedRoute, "get_mow_path_geojson"],
-] as const)("%s", (_name, fetch, service) => {
+describe.each([["fetchMap", fetchMap, "get_geojson"]] as const)("%s", (_name, fetch, service) => {
   it("calls the response-only service on the mower", async () => {
     const hass = makeHass([], [], () => COLLECTION);
 
@@ -915,5 +912,53 @@ describe("modifyRunningJob", () => {
     });
 
     await expect(modifyRunningJob(hass, "lawn_mower.luba", {})).rejects.toThrow("no running job");
+  });
+});
+
+describe("canPlanRoute", () => {
+  it("needs an integration that registers mammotion.plan_route", () => {
+    const hass = makeHass([]);
+
+    expect(canPlanRoute(hass)).toBe(true);
+    expect(canPlanRoute({ ...hass, services: { mammotion: { start_mow: {} } } })).toBe(false);
+    expect(canPlanRoute({ ...hass, services: undefined })).toBe(false);
+  });
+});
+
+describe("planRoute", () => {
+  const data = { areas: ["switch.a"], channel_mode: 0 };
+
+  it("plans in one response-only call and returns the plan's route", async () => {
+    const hass = makeHass([], [], () => ({ ...COLLECTION, plan: { path_hash: "123" } }));
+
+    await expect(planRoute(hass, "lawn_mower.luba", data)).resolves.toMatchObject(COLLECTION);
+    expect(hass.calls).toEqual([
+      {
+        domain: "mammotion",
+        service: "plan_route",
+        data,
+        target: { entity_id: "lawn_mower.luba" },
+        notifyOnError: false,
+        returnResponse: true,
+      },
+    ]);
+  });
+
+  it("rejects with the integration's own message", async () => {
+    const hass = makeHass([], [], () => serviceError("Luba did not share the route it planned."));
+
+    await expect(planRoute(hass, "lawn_mower.luba", data)).rejects.toThrow(
+      "Luba did not share the route it planned.",
+    );
+  });
+
+  it("rejects without a message for a response with no route", async () => {
+    await expect(
+      planRoute(
+        makeHass([], [], () => ({ type: "FeatureCollection", features: [] })),
+        "x",
+        data,
+      ),
+    ).rejects.toThrow(/^$/);
   });
 });

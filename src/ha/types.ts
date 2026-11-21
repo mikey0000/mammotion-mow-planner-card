@@ -29,6 +29,8 @@ export interface HomeAssistant {
   readonly states: Readonly<Record<string, HassEntity>>;
   readonly entities: Readonly<Record<string, EntityRegistryDisplayEntry>>;
   readonly devices: Readonly<Record<string, DeviceRegistryEntry>>;
+  /** Registered services by domain; their descriptions are not used. */
+  readonly services?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly language: string;
   readonly locale?: { readonly language: string };
   readonly themes?: { readonly darkMode?: boolean };

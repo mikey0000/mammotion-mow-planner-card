@@ -14,6 +14,7 @@ import {
   withChanges,
   type FakeEntity,
   type FakeHass,
+  serviceError,
   type ServiceCall,
 } from "./ha/_helpers";
 
@@ -350,8 +351,6 @@ async function startMowing(card: MowPlannerCard): Promise<void> {
 const callsTo = (hass: FakeHass, service: string) => hass.calls.filter((c) => c.service === service);
 
 const startData = (hass: FakeHass) => callsTo(hass, "start_mow").map((call) => call.data);
-
-const realStarts = (hass: FakeHass) => callsTo(hass, "start_mow").filter((c) => c.data?.plan_only !== true);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -1667,15 +1666,31 @@ describe("mower picker", () => {
 describe("exact route", () => {
   const routeHass = (route: unknown, state = "docked") =>
     lubaHass(
-      (service) => (service === "get_geojson" ? MAP : service === "get_mow_path_geojson" ? route : undefined),
+      (service, call) =>
+        service === "get_geojson"
+          ? MAP
+          : service === "plan_route"
+            ? typeof route === "function"
+              ? (route as Responder)(service, call)
+              : route
+            : undefined,
       withChanges(lubaEntities(), { [LUBA]: { state } }),
     );
 
   const ROUTE_CONFIRM =
     "Ask Luba to plan this route? It won't start mowing, but a paused job would be dropped.";
 
+  const planData = (hass: FakeHass) => callsTo(hass, "plan_route").map((call) => call.data);
+
   it("is not offered by default", async () => {
     const card = await mount(lubaHass());
+    await toReview(card);
+    expect(hasButton(card, "Get route from mower")).toBe(false);
+  });
+
+  it("is not offered by an integration without mammotion.plan_route", async () => {
+    const hass = { ...routeHass(ROUTE), services: { mammotion: { start_mow: {} } } };
+    const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
     expect(hasButton(card, "Get route from mower")).toBe(false);
   });
@@ -1694,56 +1709,49 @@ describe("exact route", () => {
     expect(hass.calls.map((call) => call.service)).toEqual(["get_geojson"]);
   });
 
-  it("plans on the mower once confirmed, then fetches and shows its route", async () => {
-    const hass = routeHass(ROUTE);
+  it("plans once confirmed, in one call that returns the plan's own route, and shows it", async () => {
+    const hass = routeHass({ ...ROUTE, plan: { path_hash: "77" } });
     const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
 
     await click(card, button(card, "Get route from mower"));
     await armAndConfirm(card, "Get route");
-    expect(button(card, "Getting route from mower…").disabled).toBe(true);
-    await vi.advanceTimersByTimeAsync(2000);
-    await settle(card);
 
-    expect(hass.calls.map((call) => call.service)).toEqual([
-      "get_geojson",
-      "start_mow",
-      "fetch_mow_path",
-      "get_mow_path_geojson",
-    ]);
-    expect(startData(hass)).toEqual([{ areas: [FRONT], ...LUBA_FIELDS, plan_only: true }]);
-    expect(callsTo(hass, "get_mow_path_geojson")[0]).toMatchObject({
+    expect(hass.calls.map((call) => call.service)).toEqual(["get_geojson", "plan_route"]);
+    expect(planData(hass)).toEqual([{ areas: [FRONT], ...LUBA_FIELDS }]);
+    expect(callsTo(hass, "plan_route")[0]).toMatchObject({
       target: { entity_id: LUBA },
       returnResponse: true,
     });
     const route = mapEl(card).route;
     expect(route).toHaveLength(1);
     expect(route?.[0]).toHaveLength(3);
-    expect(realStarts(hass)).toEqual([]);
+    expect(callsTo(hass, "start_mow")).toEqual([]);
   });
 
   it("sends only held or edited settings with the route request", async () => {
     const hass = lubaHass(
-      (service) => (service === "get_geojson" ? MAP : service === "get_mow_path_geojson" ? ROUTE : undefined),
+      (service) => (service === "get_geojson" ? MAP : service === "plan_route" ? ROUTE : undefined),
       withChanges(lubaEntities(), { "number.luba_blade_height": { state: "unknown" } }),
     );
-    const heldFields = without(LUBA_FIELDS, "blade_height");
     const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
 
     await click(card, button(card, "Get route from mower"));
     await armAndConfirm(card, "Get route");
 
-    expect(startData(hass)).toEqual([{ areas: [FRONT], ...heldFields, plan_only: true }]);
+    expect(planData(hass)).toEqual([{ areas: [FRONT], ...without(LUBA_FIELDS, "blade_height") }]);
   });
 
-  it("disables everything and starts nothing while the route loads", async () => {
-    const hass = routeHass({});
+  it("disables everything and starts nothing while the mower plans", async () => {
+    const planned = deferred();
+    const hass = routeHass(() => planned.promise);
     const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
     await click(card, button(card, "Get route from mower"));
     await armAndConfirm(card, "Get route");
 
+    expect(button(card, "Getting route from mower…").disabled).toBe(true);
     expect(button(card, "Start mowing").disabled).toBe(true);
     expect(button(card, "Back").disabled).toBe(true);
     expect(button(card, "Refresh map").disabled).toBe(true);
@@ -1752,25 +1760,39 @@ describe("exact route", () => {
     await forceClick(card, button(card, "Start mowing"));
     await forceClick(card, button(card, "Getting route from mower…"));
     await arm(card);
+    planned.resolve(ROUTE);
+    await settle(card);
 
     expect(confirmation(card)).toBeNull();
-    expect(callsTo(hass, "start_mow")).toHaveLength(1);
+    expect(callsTo(hass, "plan_route")).toHaveLength(1);
+    expect(callsTo(hass, "start_mow")).toEqual([]);
+    expect(mapEl(card).route).toHaveLength(1);
   });
 
-  it("reports when the mower shares no route", async () => {
-    const hass = routeHass({});
+  it("shows the integration's reason when the mower shares no route", async () => {
+    const hass = routeHass(() => serviceError("Luba did not share the route it planned."));
     const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
 
     await click(card, button(card, "Get route from mower"));
     await armAndConfirm(card, "Get route");
-    await vi.advanceTimersByTimeAsync(20_000);
-    await settle(card);
 
-    expect(callsTo(hass, "get_mow_path_geojson")).toHaveLength(10);
-    expect(statuses(card)).toContain("The mower didn't share a route");
+    expect(statuses(card)).toContain("Luba did not share the route it planned.");
     expect(mapEl(card).route).toBeUndefined();
     expect(button(card, "Start mowing").disabled).toBe(false);
+  });
+
+  it("falls back to a general message when the integration gives none", async () => {
+    const card = await mount(routeHass({ type: "FeatureCollection", features: [] }), {
+      type: "x",
+      exact_route: true,
+    });
+    await toReview(card);
+
+    await click(card, button(card, "Get route from mower"));
+    await armAndConfirm(card, "Get route");
+
+    expect(statuses(card)).toContain("The mower didn't share a route");
   });
 
   it.each(["mowing", "paused", "returning"])("is not offered while the mower is %s", async (state) => {
@@ -1791,7 +1813,7 @@ describe("exact route", () => {
     expect(hasButton(card, "Get route from mower")).toBe(false);
   });
 
-  it("does not send the route request once the mower has started a job meanwhile", async () => {
+  it("does not plan once the mower has started a job meanwhile", async () => {
     const hass = routeHass(ROUTE);
     const card = await mount(hass, { type: "x", exact_route: true });
     await toReview(card);
@@ -1801,7 +1823,7 @@ describe("exact route", () => {
     await update(card, nextHass(hass, { [LUBA]: "mowing" }));
     if (confirmation(card)) await click(card, button(card, "Get route"));
 
-    expect(callsTo(hass, "start_mow")).toEqual([]);
+    expect(callsTo(hass, "plan_route")).toEqual([]);
   });
 });
 
@@ -1822,7 +1844,12 @@ describe("optimal direction from a plan", () => {
 
   const optimalHass = (route: unknown, state = "docked") =>
     lubaHass(
-      (service) => (service === "get_geojson" ? MAP : service === "get_mow_path_geojson" ? route : undefined),
+      (service) => {
+        if (service === "get_geojson") return MAP;
+        if (service !== "plan_route") return undefined;
+        if (route instanceof Error) return serviceError(route.message);
+        return route;
+      },
       withChanges(lubaEntities(), {
         [LUBA]: { state },
         "select.luba_cutting_angle_mode": {
@@ -1841,8 +1868,6 @@ describe("optimal direction from a plan", () => {
     find.click();
     await settle(card);
     await armAndConfirm(card, "Ask mower");
-    await vi.advanceTimersByTimeAsync(2000);
-    await settle(card);
   }
 
   it("guesses the direction until asked, and says so", async () => {
@@ -1862,16 +1887,14 @@ describe("optimal direction from a plan", () => {
     await findOptimal(card);
 
     expect(textOf(confirmation(card))).toBe("");
-    expect(hass.calls.map((call) => call.service)).toEqual([
-      "get_geojson",
-      "start_mow",
-      "fetch_mow_path",
-      "get_mow_path_geojson",
-    ]);
-    expect(startData(hass)).toEqual([
-      { areas: [FRONT], ...LUBA_FIELDS, channel_mode: 0, toward_mode: 0, toward: 0, plan_only: true },
-    ]);
-    expect(realStarts(hass)).toEqual([]);
+    expect(hass.calls.map((call) => call.service)).toEqual(["get_geojson", "plan_route"]);
+    expect(callsTo(hass, "plan_route")[0]?.data).toEqual({
+      areas: [FRONT],
+      ...LUBA_FIELDS,
+      channel_mode: 0,
+      toward_mode: 0,
+      toward: 0,
+    });
     expect(status(card)).toBe("Direction from the mower's plan");
     expect(panel(card).angleBase).toBeCloseTo(60, 3);
     expect(mapEl(card).previews[0]?.directionDeg).toBeCloseTo(70, 3);
@@ -1888,7 +1911,7 @@ describe("optimal direction from a plan", () => {
     expect(textOf(confirmation(card)?.querySelector("p"))).toBe(
       "Ask Luba to plan these areas to learn its direction? It won't start mowing, but a paused job would be dropped.",
     );
-    expect(callsTo(hass, "start_mow")).toEqual([]);
+    expect(callsTo(hass, "plan_route")).toEqual([]);
   });
 
   it("asks again for an area added later, keeping what it learnt", async () => {
@@ -1904,15 +1927,31 @@ describe("optimal direction from a plan", () => {
     expect(panel(card).angleBase).toBeCloseTo(60, 3);
   });
 
-  it("reports a plan without a usable route and offers to ask again", async () => {
-    const card = await mount(optimalHass(undefined));
+  it("reports a route without a clear direction and offers to ask again", async () => {
+    const card = await mount(optimalHass({ type: "FeatureCollection", features: [] }));
     await click(card, button(card, "Next"));
 
     await findOptimal(card);
-    await vi.advanceTimersByTimeAsync(20_000);
-    await settle(card);
 
     expect(status(card)).toBe("The mower didn't share a plan Find optimal direction");
+  });
+
+  it("shows the integration's own reason when it refuses or gets no route", async () => {
+    const card = await mount(optimalHass(new Error("Luba did not share the route it planned.")));
+    await click(card, button(card, "Next"));
+
+    await findOptimal(card);
+
+    expect(status(card)).toBe("Luba did not share the route it planned. Find optimal direction");
+  });
+
+  it("says a newer integration is needed instead of offering it on one without mammotion.plan_route", async () => {
+    const hass = { ...optimalHass(plannedRoute(60)), services: { mammotion: { start_mow: {} } } };
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+
+    expect(status(card)).toBe("Finding it needs Mammotion integration 0.6.24 or newer");
+    expect(mapEl(card).note).toBe("Preview is approximate: the mower picks the final direction");
   });
 
   it("never asks a busy mower", async () => {
@@ -1921,7 +1960,7 @@ describe("optimal direction from a plan", () => {
     await click(card, button(card, "2Pattern"));
 
     expect(panel(card).shadowRoot?.querySelector(".optimal")).toBeNull();
-    expect(callsTo(hass, "start_mow")).toEqual([]);
+    expect(callsTo(hass, "plan_route")).toEqual([]);
   });
 
   it("turns the dial's zero by the angle offset in Custom mode", async () => {

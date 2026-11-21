@@ -1,3 +1,4 @@
+import type { FeatureCollection } from "geojson";
 import {
   mdiAlertOutline,
   mdiBattery,
@@ -21,13 +22,13 @@ import { previewArea } from "./geo/preview";
 import { projectMap, projectPosition } from "./geo/project";
 import {
   fetchMap,
-  fetchPlannedRoute,
+  canPlanRoute,
   findMowers,
   modifyJobData,
   modifyRunningJob,
   mowerName,
+  planRoute,
   readMower,
-  requestPlannedRoute,
   startMow,
   startMowData,
   type AreaSwitch,
@@ -61,15 +62,15 @@ type Request =
   | { readonly status: "sending" | "sent" | "failed"; readonly plan: Plan };
 
 type RouteState =
-  | { readonly status: "idle" | "loading" | "unavailable" }
+  | { readonly status: "idle" | "loading" }
+  /** `message` is the integration's own reason, when it gave one. */
+  | { readonly status: "unavailable"; readonly message?: string }
   | { readonly status: "ready"; readonly lines: readonly (readonly Point[])[] };
 
 const IDLE = { status: "idle" } as const;
 const KNOWN_STATES = ["mowing", "paused", "returning", "docked", "idle", "error"] as const;
 const ACTIVE_STATES: readonly string[] = ["mowing", "paused", "returning"];
 const OFFLINE_STATES: readonly string[] = ["unavailable", "unknown"];
-const ROUTE_POLL_MS = 2000;
-const ROUTE_POLLS = 10;
 /** Keeps a double tap on Start from also confirming it. */
 const CONFIRM_ARM_MS = 600;
 
@@ -110,7 +111,13 @@ function withSwitchNames(model: MapModel, switches: readonly AreaSwitch[]): MapM
   };
 }
 
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** The planned route's lines in the map frame. */
+const routeLines = (route: FeatureCollection, origin: MapModel["origin"]): (readonly Point[])[] =>
+  route.features.flatMap(({ geometry }) =>
+    geometry.type === "LineString"
+      ? [geometry.coordinates.map(([lon = 0, lat = 0]) => projectPosition(origin, lon, lat))]
+      : [],
+  );
 
 const NO_DIRECTIONS: ReadonlyMap<number, number> = new Map();
 
@@ -133,6 +140,8 @@ export class MowPlannerCard extends LitElement {
   /** Per mower, the Optimal direction of each area the mower has planned, by area hash. */
   @state() private optimalDirections: ReadonlyMap<string, ReadonlyMap<number, number>> = new Map();
   @state() private findingOptimal: "idle" | "finding" | "failed" = "idle";
+  /** Why the last attempt failed, in the integration's words. */
+  @state() private optimalError?: string;
 
   private latestHass?: HomeAssistant;
   private mowerSnapshot = "";
@@ -220,11 +229,18 @@ export class MowPlannerCard extends LitElement {
     return this.directions.get(this.selectedAreas[0]?.hash ?? Number.NaN) ?? 0;
   }
 
+  /** The integration plans a route and returns it only from the version with `mammotion.plan_route`. */
+  private get canPlan(): boolean {
+    return Boolean(this.latestHass && canPlanRoute(this.latestHass));
+  }
+
   private get optimalState(): OptimalState | undefined {
     const selected = this.selectedAreas;
     if (this.findingOptimal === "finding") return "finding";
     if (selected.length > 0 && selected.every((area) => this.directions.has(area.hash))) return "found";
-    if (this.refuses("optimal") || this.map.status !== "ready") return undefined;
+    if (this.map.status !== "ready") return undefined;
+    if (!this.canPlan) return "unsupported";
+    if (this.refuses("optimal")) return undefined;
     return this.findingOptimal === "failed" ? "failed" : "approximate";
   }
 
@@ -254,7 +270,8 @@ export class MowPlannerCard extends LitElement {
   private refuses(kind: PlanKind): boolean {
     if (this.blocker) return true;
     if (kind === "modify") return !this.job || this.jobEdits.length === 0;
-    return Boolean(this.job) || (kind !== "start" && this.active);
+    if (kind === "start") return Boolean(this.job);
+    return Boolean(this.job) || this.active || !this.canPlan;
   }
 
   private get pathLengthM(): number {
@@ -419,7 +436,7 @@ export class MowPlannerCard extends LitElement {
           : {
               mower,
               kind,
-              data: startMowData(settings, this.sentSettings, areas, kind === "route"),
+              data: startMowData(settings, this.sentSettings, areas),
               summary: this.totals.join(" · "),
             };
     this.request = { status: "confirming", plan, armed: false };
@@ -433,7 +450,7 @@ export class MowPlannerCard extends LitElement {
   private optimalPlanData(settings: MowSettings, areas: readonly string[]): Record<string, unknown> {
     const plain: MowSettings = { ...settings, pattern: "single_grid", angleMode: "relative_angle", angle: 0 };
     const names = new Set<SettingName>([...this.sentSettings, "pattern", "angleMode", "angle"]);
-    return startMowData(plain, [...names], areas, true);
+    return startMowData(plain, [...names], areas);
   }
 
   private cancelConfirm(): void {
@@ -446,6 +463,11 @@ export class MowPlannerCard extends LitElement {
     if (!hass || request.status !== "confirming" || !request.armed) return;
     const { plan } = request;
     if (this.refuses(plan.kind)) return;
+    if (plan.kind === "route" || plan.kind === "optimal") {
+      this.request = IDLE;
+      await this.planAndRead(hass, plan);
+      return;
+    }
     this.request = { status: "sending", plan };
     let sent = true;
     try {
@@ -453,75 +475,31 @@ export class MowPlannerCard extends LitElement {
     } catch {
       sent = false;
     }
-    if (plan.kind === "route") {
-      this.request = IDLE;
-      if (sent) await this.loadRoute(hass, plan.mower.entityId);
-      else this.route = { status: "unavailable" };
-    } else if (plan.kind === "optimal") {
-      this.request = IDLE;
-      if (sent) await this.findOptimal(hass, plan.mower.entityId);
-      else this.findingOptimal = "failed";
-    } else {
-      this.request = { status: sent ? "sent" : "failed", plan };
-    }
+    this.request = { status: sent ? "sent" : "failed", plan };
   }
 
-  /** Asks the mower for the route it last planned and polls until it arrives, or gives up. */
-  private async plannedLines(
-    hass: HomeAssistant,
-    mowerId: string,
-    origin: MapModel["origin"],
-    wanted: () => boolean,
-  ): Promise<(readonly Point[])[] | undefined> {
-    await requestPlannedRoute(hass, mowerId);
-    for (let poll = 0; poll < ROUTE_POLLS && wanted() && this.isConnected; poll++) {
-      await wait(ROUTE_POLL_MS);
-      const geojson = await fetchPlannedRoute(hass, mowerId);
-      const lines = geojson?.features.flatMap(({ geometry }) =>
-        geometry.type === "LineString"
-          ? [geometry.coordinates.map(([lon = 0, lat = 0]) => projectPosition(origin, lon, lat))]
-          : [],
-      );
-      if (lines?.length) return lines;
-    }
-    return undefined;
-  }
-
-  private async loadRoute(hass: HomeAssistant, mowerId: string): Promise<void> {
-    if (this.map.status !== "ready") return;
-    const loading: RouteState = { status: "loading" };
-    this.route = loading;
-    let route: RouteState = { status: "unavailable" };
-    try {
-      const lines = await this.plannedLines(
-        hass,
-        mowerId,
-        this.map.model.origin,
-        () => this.route === loading,
-      );
-      if (lines) route = { status: "ready", lines };
-    } catch {
-      route = { status: "unavailable" };
-    }
-    if (this.route === loading) this.route = route;
-  }
-
-  /** Reads the direction the mower planned for each selected area off its planned route. */
-  private async findOptimal(hass: HomeAssistant, mowerId: string): Promise<void> {
+  /** Plans on the mower and reads that plan's own route: drawn for `route`, its directions kept for `optimal`. */
+  private async planAndRead(hass: HomeAssistant, plan: Plan): Promise<void> {
     if (this.map.status !== "ready") return;
     const { model } = this.map;
+    const mowerId = plan.mower.entityId;
     const areas = model.areas.filter((zone) => this.selectedAreas.some((area) => area.hash === zone.hash));
-    this.findingOptimal = "finding";
-    const wanted = () => this.findingOptimal === "finding";
-    let found: ReadonlyMap<number, number> = NO_DIRECTIONS;
+    if (plan.kind === "route") this.route = { status: "loading" };
+    else this.findingOptimal = "finding";
+    let lines: (readonly Point[])[] = [];
+    let message: string | undefined;
     try {
-      const lines = await this.plannedLines(hass, mowerId, model.origin, wanted);
-      if (lines) found = plannedDirections(lines, areas);
-    } catch {
-      found = NO_DIRECTIONS;
+      lines = routeLines(await planRoute(hass, mowerId, plan.data), model.origin);
+    } catch (error) {
+      message = (error instanceof Error && error.message) || undefined;
     }
-    if (!wanted()) return;
+    if (plan.kind === "route") {
+      this.route = lines.length ? { status: "ready", lines } : { status: "unavailable", message };
+      return;
+    }
+    const found = plannedDirections(lines, areas);
     this.findingOptimal = found.size > 0 ? "idle" : "failed";
+    this.optimalError = found.size > 0 ? undefined : message;
     const known = this.optimalDirections.get(mowerId) ?? NO_DIRECTIONS;
     if (found.size > 0) {
       this.optimalDirections = new Map([...this.optimalDirections, [mowerId, new Map([...known, ...found])]]);
@@ -763,6 +741,7 @@ export class MowPlannerCard extends LitElement {
         .locked=${this.lockedSettings}
         .angleBase=${this.angleBase}
         .optimal=${this.optimalState}
+        .optimalError=${this.optimalError}
         @find-optimal=${() => {
           this.askToConfirm("optimal");
         }}
@@ -858,6 +837,7 @@ export class MowPlannerCard extends LitElement {
     ];
     const canFetchRoute =
       this.config?.exact_route &&
+      this.canPlan &&
       this.map.status === "ready" &&
       !this.blocker &&
       !ACTIVE_STATES.includes(mower.state) &&
@@ -888,7 +868,9 @@ export class MowPlannerCard extends LitElement {
       }
       ${
         this.route.status === "unavailable"
-          ? html`<p class="secondary" role="status">${this.t("preview.exact_route_unavailable")}</p>`
+          ? html`<p class="secondary" role="status">
+              ${this.route.message ?? this.t("preview.exact_route_unavailable")}
+            </p>`
           : nothing
       }
     `;

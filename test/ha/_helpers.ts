@@ -58,6 +58,7 @@ export function makeHass(
       ]),
     ),
     devices: Object.fromEntries(devices.map((d) => [d.id, d])),
+    services: { mammotion: { start_mow: {}, modify_running_job: {}, plan_route: {}, get_geojson: {} } },
     language: "en",
     callService<T>(
       domain: string,
@@ -144,3 +145,8 @@ export function withChanges(
     return [change ? { ...e, ...change } : e];
   });
 }
+
+/** What the frontend's `callService` rejects with: the server's error object, not an `Error`. */
+export const serviceError = (message: string): Promise<never> =>
+  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- mirrors Home Assistant's websocket error
+  Promise.reject({ code: "home_assistant_error", message });
