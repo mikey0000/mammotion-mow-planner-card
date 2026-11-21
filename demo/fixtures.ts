@@ -367,9 +367,9 @@ export function demoHass(options: DemoOptions): HomeAssistant {
         if (!mower.optimal) {
           return serviceError("home_assistant_error", `${mower.name} did not share the route it planned.`);
         }
-        return {
-          response: { ...plannedRoute(mower), plan: { path_hash: "4242", toward: 0, toward_mode: 0 } },
-        };
+        // An entity service answers by entity id, even for one entity.
+        const route = { ...plannedRoute(mower), plan: { path_hash: "4242", toward: 0, toward_mode: 0 } };
+        return { response: { [`lawn_mower.${mower.slug}`]: route } };
       }
       if (service !== "get_geojson") return {};
       if (options.map === "error") throw new Error("Demo: the integration did not answer");

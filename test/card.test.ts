@@ -14,6 +14,7 @@ import {
   withChanges,
   type FakeEntity,
   type FakeHass,
+  entityResponse,
   serviceError,
   type ServiceCall,
 } from "./ha/_helpers";
@@ -1672,13 +1673,12 @@ describe("exact route", () => {
           : service === "plan_route"
             ? typeof route === "function"
               ? (route as Responder)(service, call)
-              : route
+              : entityResponse(LUBA, route)
             : undefined,
       withChanges(lubaEntities(), { [LUBA]: { state } }),
     );
 
-  const ROUTE_CONFIRM =
-    "Ask Luba to plan this route? It won't start mowing, but a paused job would be dropped.";
+  const ROUTE_CONFIRM = "Ask Luba to plan this route? It won't start mowing.";
 
   const planData = (hass: FakeHass) => callsTo(hass, "plan_route").map((call) => call.data);
 
@@ -1731,7 +1731,8 @@ describe("exact route", () => {
 
   it("sends only held or edited settings with the route request", async () => {
     const hass = lubaHass(
-      (service) => (service === "get_geojson" ? MAP : service === "plan_route" ? ROUTE : undefined),
+      (service) =>
+        service === "get_geojson" ? MAP : service === "plan_route" ? entityResponse(LUBA, ROUTE) : undefined,
       withChanges(lubaEntities(), { "number.luba_blade_height": { state: "unknown" } }),
     );
     const card = await mount(hass, { type: "x", exact_route: true });
@@ -1760,7 +1761,7 @@ describe("exact route", () => {
     await forceClick(card, button(card, "Start mowing"));
     await forceClick(card, button(card, "Getting route from mower…"));
     await arm(card);
-    planned.resolve(ROUTE);
+    planned.resolve(entityResponse(LUBA, ROUTE));
     await settle(card);
 
     expect(confirmation(card)).toBeNull();
@@ -1848,7 +1849,7 @@ describe("optimal direction from a plan", () => {
         if (service === "get_geojson") return MAP;
         if (service !== "plan_route") return undefined;
         if (route instanceof Error) return serviceError(route.message);
-        return route;
+        return entityResponse(LUBA, route);
       },
       withChanges(lubaEntities(), {
         [LUBA]: { state },
@@ -1909,7 +1910,7 @@ describe("optimal direction from a plan", () => {
     await settle(card);
 
     expect(textOf(confirmation(card)?.querySelector("p"))).toBe(
-      "Ask Luba to plan these areas to learn its direction? It won't start mowing, but a paused job would be dropped.",
+      "Ask Luba to plan these areas to learn its direction? It won't start mowing.",
     );
     expect(callsTo(hass, "plan_route")).toEqual([]);
   });

@@ -13,7 +13,7 @@ import {
   startMowData,
 } from "../../src/ha/mower";
 import type { MowSettings } from "../../src/model";
-import { device, lubaEntities, makeHass, serviceError, withChanges } from "./_helpers";
+import { device, entityResponse, lubaEntities, makeHass, serviceError, withChanges } from "./_helpers";
 
 const LUBA = device("dev1", "Luba");
 const UNAVAILABLE = { state: "unavailable", attributes: {} };
@@ -929,7 +929,9 @@ describe("planRoute", () => {
   const data = { areas: ["switch.a"], channel_mode: 0 };
 
   it("plans in one response-only call and returns the plan's route", async () => {
-    const hass = makeHass([], [], () => ({ ...COLLECTION, plan: { path_hash: "123" } }));
+    const hass = makeHass([], [], () =>
+      entityResponse("lawn_mower.luba", { ...COLLECTION, plan: { path_hash: "123" } }),
+    );
 
     await expect(planRoute(hass, "lawn_mower.luba", data)).resolves.toMatchObject(COLLECTION);
     expect(hass.calls).toEqual([
@@ -952,11 +954,15 @@ describe("planRoute", () => {
     );
   });
 
-  it("rejects without a message for a response with no route", async () => {
+  it.each([
+    ["unkeyed", COLLECTION],
+    ["for another mower", entityResponse("lawn_mower.yuka", COLLECTION)],
+    ["empty", entityResponse("lawn_mower.luba", { type: "FeatureCollection", features: [] })],
+  ])("treats an %s response as no route", async (_kind, response) => {
     await expect(
       planRoute(
-        makeHass([], [], () => ({ type: "FeatureCollection", features: [] })),
-        "x",
+        makeHass([], [], () => response),
+        "lawn_mower.luba",
         data,
       ),
     ).rejects.toThrow(/^$/);

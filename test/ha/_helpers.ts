@@ -150,3 +150,8 @@ export function withChanges(
 export const serviceError = (message: string): Promise<never> =>
   // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- mirrors Home Assistant's websocket error
   Promise.reject({ code: "home_assistant_error", message });
+
+/** How Home Assistant answers an entity service: keyed by entity id, even for one entity. */
+export const entityResponse = (entityId: string, value: unknown): Record<string, unknown> => ({
+  [entityId]: value,
+});

@@ -492,13 +492,22 @@ export function modifyJobData(settings: MowSettings, names: readonly SettingName
   return serviceFields(settings, names);
 }
 
-async function fetchFeatures(
+const asFeatures = (value: unknown): FeatureCollection | undefined =>
+  typeof value === "object" &&
+  value !== null &&
+  "features" in value &&
+  Array.isArray(value.features) &&
+  value.features.length > 0
+    ? (value as FeatureCollection)
+    : undefined;
+
+async function responseOf(
   hass: HomeAssistant,
   service: string,
   entityId: string,
   data: Record<string, unknown> = {},
-): Promise<FeatureCollection | undefined> {
-  const { response } = await hass.callService<{ features?: unknown }>(
+): Promise<unknown> {
+  const { response } = await hass.callService(
     "mammotion",
     service,
     data,
@@ -506,13 +515,14 @@ async function fetchFeatures(
     false,
     true,
   );
-  return Array.isArray(response?.features) && response.features.length > 0
-    ? (response as FeatureCollection)
-    : undefined;
+  return response;
 }
 
-export function fetchMap(hass: HomeAssistant, entityId: string): Promise<FeatureCollection | undefined> {
-  return fetchFeatures(hass, "get_geojson", entityId);
+export async function fetchMap(
+  hass: HomeAssistant,
+  entityId: string,
+): Promise<FeatureCollection | undefined> {
+  return asFeatures(await responseOf(hass, "get_geojson", entityId));
 }
 
 /** Whether the integration can plan a route and hand it back, which `mammotion.plan_route` brought. */
@@ -532,12 +542,18 @@ export async function planRoute(
   entityId: string,
   data: Record<string, unknown>,
 ): Promise<FeatureCollection> {
-  let route: FeatureCollection | undefined;
+  let response: unknown;
   try {
-    route = await fetchFeatures(hass, "plan_route", entityId, data);
+    response = await responseOf(hass, "plan_route", entityId, data);
   } catch (error) {
     throw new Error(messageOf(error), { cause: error });
   }
+  // An entity service answers by entity id, even for one entity.
+  const route = asFeatures(
+    typeof response === "object" && response !== null
+      ? (response as Record<string, unknown>)[entityId]
+      : undefined,
+  );
   if (!route) throw new Error("");
   return route;
 }
