@@ -59,14 +59,14 @@ The preview is computed in the browser from the map and your settings. It is a f
 ### Path angle
 
 - **Custom** uses your angle as a fixed direction on the map: 0° runs east–west, 90° north–south.
-- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy, because planning drops a paused job. With an integration older than 0.6.24 the button is replaced by a note that a newer one is needed.
+- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy; the integration also refuses while the mower holds an unfinished job. With an integration older than 0.6.24 the button is replaced by a note that a newer one is needed.
 - **Random** changes direction every job. The card shows one example.
 
 The mower measures custom angles in its own map frame, which can be rotated from true north. If the stripes on your lawn end up turned compared with the preview, set `angle_offset` to the difference.
 
 ## Limits
 
-- The preview is a sketch, not the route the mower will take. `exact_route: true` adds **Get route from mower**, which after you confirm asks the mower to plan the job without starting and shows the route of that plan, through `mammotion.plan_route`. Planning drops a paused job, so the card never asks a busy mower. If the mower shares no route, the card shows the integration's reason; over the cloud the integration's mow path fetching option has to be on.
+- The preview is a sketch, not the route the mower will take. `exact_route: true` adds **Get route from mower**, which after you confirm asks the mower to plan the job without starting and shows the route of that plan, through `mammotion.plan_route`. Planning never touches a job: the card doesn't ask a busy mower, and the integration refuses while one holds an unfinished job. If the mower shares no route, the card shows the integration's reason; over the cloud the integration's mow path fetching option has to be on.
 - A setting whose entity is missing or has no value is left out of the start command unless you change it, so the job uses the integration's own value.
 - Obstacle detection is offered only when its entity lists one of the option sets the integration is known to produce, because the code sent for **Off** differs between them.
 - Starting a job while the mower is busy without a job to change, such as on its way home from a finished one, ends what it is doing first. The card warns you in the review step.

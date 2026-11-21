@@ -264,8 +264,8 @@ export class MowPlannerCard extends LitElement {
   }
 
   /**
-   * A running job is changed, never replaced, from the card; planning a route drops a paused job,
-   * so a busy mower is never asked for one.
+   * A running job is changed, never replaced, from the card, and a busy mower is never asked to plan:
+   * the integration refuses that anyway.
    */
   private refuses(kind: PlanKind): boolean {
     if (this.blocker) return true;
