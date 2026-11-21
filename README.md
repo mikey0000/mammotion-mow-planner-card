@@ -13,7 +13,8 @@ The card reads the map and your current settings from the integration. A job is 
 ## Requirements
 
 - Home Assistant 2024.11 or newer.
-- The Mammotion integration, with at least one mower that has a map. Changing a running job works best with a version whose mower entity has the `running_job` and `running_job_modifiable` attributes; see [During a job](#during-a-job).
+- The Mammotion integration, with at least one mower that has a map.
+- Mammotion integration 0.6.24 or newer for **Find optimal direction**, **Get route from mower** (`mammotion.plan_route`) and for changing a running job exactly (the `running_job` attributes). Older versions get the rest of the card; see [During a job](#during-a-job) for what changes.
 
 ## Install
 
@@ -37,12 +38,12 @@ Add the **Mammotion Mow Planner** card from the card picker, or in YAML:
 type: custom:mammotion-mow-planner-card
 ```
 
-| Option         | Type    | Default        | Description                                                                             |
-| -------------- | ------- | -------------- | --------------------------------------------------------------------------------------- |
-| `entities`     | list    | all mowers     | `lawn_mower` entities to offer. With more than one, the card shows a mower picker.      |
-| `title`        | string  | the mower name | Heading of the card.                                                                    |
-| `angle_offset` | number  | `0`            | Degrees added to custom path angles in the preview. See [Path angle](#path-angle).      |
-| `exact_route`  | boolean | `false`        | Offer **Get route from mower** in the review step. Experimental, see [Limits](#limits). |
+| Option         | Type    | Default        | Description                                                                        |
+| -------------- | ------- | -------------- | ---------------------------------------------------------------------------------- |
+| `entities`     | list    | all mowers     | `lawn_mower` entities to offer. With more than one, the card shows a mower picker. |
+| `title`        | string  | the mower name | Heading of the card.                                                               |
+| `angle_offset` | number  | `0`            | Degrees added to custom path angles in the preview. See [Path angle](#path-angle). |
+| `exact_route`  | boolean | `false`        | Offer **Get route from mower** in the review step. See [Limits](#limits).          |
 
 The card works best at half a dashboard width or more. On a wide card the map sits beside the settings; on a phone it stays pinned above them while you scroll.
 
@@ -58,14 +59,14 @@ The preview is computed in the browser from the map and your settings. It is a f
 ### Path angle
 
 - **Custom** uses your angle as a fixed direction on the map: 0° runs east–west, 90° north–south.
-- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy, because planning drops a paused job.
+- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy, because planning drops a paused job. With an integration older than 0.6.24 the button is replaced by a note that a newer one is needed.
 - **Random** changes direction every job. The card shows one example.
 
 The mower measures custom angles in its own map frame, which can be rotated from true north. If the stripes on your lawn end up turned compared with the preview, set `angle_offset` to the difference.
 
 ## Limits
 
-- The preview cannot show the route the mower will actually take. `exact_route: true` adds a button that, after you confirm, asks the mower to plan the job without starting and then fetches that route. Planning drops a paused job on the mower. It depends on integration behaviour that is not reliable yet, so it may report that the mower shared no route, or show the route of an earlier job. **Find optimal direction** uses the same plan and route fetch, with the same caveat: an earlier job's route over the same areas would give that job's direction.
+- The preview is a sketch, not the route the mower will take. `exact_route: true` adds **Get route from mower**, which after you confirm asks the mower to plan the job without starting and shows the route of that plan, through `mammotion.plan_route`. Planning drops a paused job, so the card never asks a busy mower. If the mower shares no route, the card shows the integration's reason; over the cloud the integration's mow path fetching option has to be on.
 - A setting whose entity is missing or has no value is left out of the start command unless you change it, so the job uses the integration's own value.
 - Obstacle detection is offered only when its entity lists one of the option sets the integration is known to produce, because the code sent for **Off** differs between them.
 - Starting a job while the mower is busy without a job to change, such as on its way home from a finished one, ends what it is doing first. The card warns you in the review step.
@@ -88,7 +89,7 @@ npm run demo    # http://localhost:5173/demo/ with a mock Home Assistant
 npm run check   # typecheck, lint, tests and build
 ```
 
-The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a paused Yuka with a grass collector whose integration lacks the running-job attributes, to show the fallback. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty` or `?map=error` to the URL to try other states.
+The demo page runs the card against made-up mowers: a docked Luba 2, a Yuka Mini that is mowing, and a paused Yuka with a grass collector whose integration lacks the running-job attributes, to show the fallback. Service calls are listed under the card and never leave the page. Add `?dark`, `?lang=de`, `?lang=he` (right-to-left), `?single`, `?map=empty`, `?map=error` or `?legacy` (an integration without `mammotion.plan_route`) to the URL to try other states.
 
 `npm run build` writes `dist/mammotion-mow-planner-card.js`. Pushing a `v*` tag builds it and attaches it to the GitHub release, which is what HACS installs.
 
