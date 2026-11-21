@@ -131,4 +131,5 @@ export const en = {
   "action.confirm_optimal": "Ask mower",
   "review.mower_value": "Mower's own setting",
   "optimal.unsupported": "Finding it needs Mammotion integration 0.6.24 or newer",
+  "save.failed": "Couldn't save {setting}",
 };

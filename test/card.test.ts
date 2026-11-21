@@ -1547,6 +1547,210 @@ describe("during a running job the integration reports", () => {
   });
 });
 
+describe("saving settings to the mower's entities", () => {
+  const IDLE_ATTRIBUTES = { friendly_name: "Luba", running_job: null, running_job_modifiable: false };
+  const saving = (respond: Responder = withMap, changes: Parameters<typeof withChanges>[1] = {}) =>
+    lubaHass(respond, withChanges(lubaEntities(), { [LUBA]: { attributes: IDLE_ATTRIBUTES }, ...changes }));
+
+  const writes = (hass: FakeHass) =>
+    hass.calls
+      .filter((call) => ["select", "number", "switch"].includes(call.domain))
+      .map((call) => [call.domain, call.service, call.target?.entity_id, call.data]);
+
+  async function settleWrites(card: MowPlannerCard): Promise<void> {
+    await vi.advanceTimersByTimeAsync(600);
+    await settle(card);
+  }
+
+  it("writes a change to its entity once it settles, showing it at once", async () => {
+    const hass = saving();
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+
+    await editSettings(card, { spacingCm: 30 });
+    expect(panel(card).settings.spacingCm).toBe(30);
+    expect(writes(hass)).toEqual([]);
+    await settleWrites(card);
+
+    expect(writes(hass)).toEqual([["number", "set_value", "number.luba_path_spacing", { value: 30 }]]);
+    expect(hass.calls.find((call) => call.domain === "number")?.notifyOnError).toBe(false);
+  });
+
+  it("writes once per settle with the last value, for a drag of many steps", async () => {
+    const hass = saving();
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+
+    for (const angle of [31, 33, 36, 40]) {
+      await editSettings(card, { angle });
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    await editSettings(card, { pattern: "single_grid" });
+    await settleWrites(card);
+
+    expect(writes(hass)).toEqual([
+      ["number", "set_value", "number.luba_cutting_angle", { value: 40 }],
+      ["select", "select_option", "select.luba_channel_mode", { option: "single_grid" }],
+    ]);
+  });
+
+  it("never overlaps writes to one entity: a newer value waits for the one in flight", async () => {
+    const first = deferred();
+    const hass = saving((service, call) =>
+      call.domain === "number" && writes(hass).length === 1 ? first.promise : withMap(service, call),
+    );
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { spacingCm: 30 });
+    await settleWrites(card);
+
+    await editSettings(card, { spacingCm: 32 });
+    await settleWrites(card);
+    expect(writes(hass)).toHaveLength(1);
+    first.resolve(undefined);
+    await settle(card);
+
+    expect(writes(hass).map(([, , , data]) => data)).toEqual([{ value: 30 }, { value: 32 }]);
+  });
+
+  it("keeps the user's value until the entity holds it, then follows the entity again", async () => {
+    const hass = saving();
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { spacingCm: 30 });
+
+    await update(card, nextHass(hass, { "number.luba_working_speed": "0.5" }));
+    expect(panel(card).settings.spacingCm).toBe(30);
+    await settleWrites(card);
+    await update(card, nextHass(hass, { "number.luba_path_spacing": "30" }));
+    await update(card, nextHass(hass, { "number.luba_path_spacing": "33" }));
+
+    expect(panel(card).settings.spacingCm).toBe(33);
+  });
+
+  it("is not flipped back by the echo of an earlier write while a later one is pending", async () => {
+    const first = deferred();
+    const hass = saving((service, call) =>
+      call.domain === "number" && writes(hass).length === 1 ? first.promise : withMap(service, call),
+    );
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { spacingCm: 30 });
+    await settleWrites(card);
+    await editSettings(card, { spacingCm: 28 });
+    await update(card, nextHass(hass, { "number.luba_working_speed": "0.5" }));
+
+    await update(
+      card,
+      nextHass(hass, { "number.luba_working_speed": "0.5", "number.luba_path_spacing": "30" }),
+    );
+    expect(panel(card).settings.spacingCm).toBe(28);
+    first.resolve(undefined);
+    await settleWrites(card);
+    await update(card, nextHass(hass, { "number.luba_path_spacing": "28" }));
+
+    expect(writes(hass).map(([, , , data]) => data)).toEqual([{ value: 30 }, { value: 28 }]);
+    expect(panel(card).settings.spacingCm).toBe(28);
+  });
+
+  it("reports a failed write and falls back to the entity's value", async () => {
+    const hass = saving((service, call) =>
+      call.domain === "number" ? serviceError("Value 30 is out of range") : withMap(service, call),
+    );
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { spacingCm: 30 });
+
+    await settleWrites(card);
+
+    expect(alerts(card)).toEqual(["Couldn't save Path spacing. Value 30 is out of range"]);
+    expect(panel(card).settings.spacingCm).toBe(28);
+  });
+
+  it("keeps saved settings through New plan, resetting only the areas and the step", async () => {
+    const hass = saving();
+    const card = await mount(hass);
+    await click(card, chip(card, "Back lawn"));
+    await toReviewWith(card, { spacingCm: 30 });
+    await startMowing(card);
+
+    await click(card, button(card, "New plan"));
+
+    expect(pressed(card)).toEqual(["1Area Front"]);
+    await click(card, button(card, "Next"));
+    expect(panel(card).settings.spacingCm).toBe(30);
+    expect(writes(hass)).toEqual([["number", "set_value", "number.luba_path_spacing", { value: 30 }]]);
+  });
+
+  it("keeps a setting without an entity in the card", async () => {
+    const hass = saving(withMap, { "number.luba_path_spacing": null });
+    const card = await mount(hass);
+    await toReviewWith(card, { spacingCm: 22 });
+    await settleWrites(card);
+
+    expect(writes(hass)).toEqual([]);
+    await startMowing(card);
+    expect(startData(hass)[0]).toMatchObject({ channel_width: 22 });
+  });
+
+  it("writes nothing for an integration that does not report the running job", async () => {
+    const hass = lubaHass();
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { spacingCm: 30 });
+    await settleWrites(card);
+
+    expect(writes(hass)).toEqual([]);
+  });
+
+  it("writes nothing during a job, where changes go to the running job instead", async () => {
+    const hass = lubaHass(
+      withMap,
+      withChanges(lubaEntities(), {
+        [LUBA]: {
+          state: "mowing",
+          attributes: {
+            ...IDLE_ATTRIBUTES,
+            running_job: { areas: [111], speed: 0.4 },
+            running_job_modifiable: true,
+          },
+        },
+      }),
+    );
+    const card = await mount(hass);
+    await click(card, button(card, "2Pattern"));
+    await editSettings(card, { speed: 0.5 });
+    await settleWrites(card);
+
+    expect(writes(hass)).toEqual([]);
+    await click(card, button(card, "Next"));
+    expect(button(card, "Apply changes").disabled).toBe(false);
+  });
+
+  it("drops an unsent write when a job starts", async () => {
+    const hass = saving();
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    await editSettings(card, { speed: 0.5 });
+
+    const mowing = {
+      ...hass,
+      states: {
+        ...hass.states,
+        [LUBA]: {
+          entity_id: LUBA,
+          state: "mowing",
+          attributes: { ...IDLE_ATTRIBUTES, running_job: { areas: [111] }, running_job_modifiable: true },
+        },
+      },
+    };
+    await update(card, mowing);
+    await settleWrites(card);
+
+    expect(writes(hass)).toEqual([]);
+  });
+});
+
 describe("mower picker", () => {
   it("lists every mower as the heading", async () => {
     const card = await mount(twoMowers());

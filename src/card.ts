@@ -29,12 +29,16 @@ import {
   mowerName,
   planRoute,
   readMower,
+  settingWrite,
+  writeSetting,
+  type SettingWrite,
   startMow,
   startMowData,
   type AreaSwitch,
   type Mower,
 } from "./ha/mower";
 import type { HomeAssistant } from "./ha/types";
+import { CoalescingWriter } from "./ha/writer";
 import { isRtl, localize, type StringKey } from "./localize";
 import type { AreaPreview, MapModel, Marker, MowSettings, Point, SettingName } from "./model";
 import { controlStyles } from "./styles";
@@ -142,6 +146,7 @@ export class MowPlannerCard extends LitElement {
   @state() private findingOptimal: "idle" | "finding" | "failed" = "idle";
   /** Why the last attempt failed, in the integration's words. */
   @state() private optimalError?: string;
+  @state() private saveError?: string;
 
   private latestHass?: HomeAssistant;
   private mowerSnapshot = "";
@@ -151,6 +156,15 @@ export class MowPlannerCard extends LitElement {
   private hadFocus = false;
   private jobMode = false;
   private readonly loadedMaps = new Map<string, MapState>();
+  /** Saves settings to their planning entities, keyed by entity id. */
+  private readonly writer = new CoalescingWriter<SettingWrite>(
+    async (_, write) => {
+      if (this.latestHass) await writeSetting(this.latestHass, write);
+    },
+    (entityId, error) => {
+      this.saved(entityId, error);
+    },
+  );
 
   setConfig(config: unknown): void {
     this.config = normalizeConfig(config);
@@ -298,12 +312,18 @@ export class MowPlannerCard extends LitElement {
 
   protected override willUpdate(changed: PropertyValues): void {
     this.hadFocus = this.matches(":focus-within");
-    if (changed.has("mowerId")) this.resetPlan();
+    if (changed.has("mowerId")) {
+      this.edits = {};
+      this.resetPlan();
+    }
     const jobMode = Boolean(this.job);
     if (jobMode !== this.jobMode) {
       this.jobMode = jobMode;
+      // Several planning entities re-issue the running route when set, so nothing unsent may land during a job.
+      this.writer.cancel();
       this.edits = {};
     }
+    if (changed.has("mower")) this.dropSavedEdits();
     this.refreshPreviews();
     if (this.request.status === "confirming" && this.refuses(this.request.plan.kind)) this.cancelConfirm();
   }
@@ -317,10 +337,13 @@ export class MowPlannerCard extends LitElement {
     }
   }
 
+  /** Keeps the settings being saved: they are the mower's own now, not part of the plan. */
   private resetPlan(): void {
     this.step = "areas";
     this.pickedHashes = undefined;
-    this.edits = {};
+    this.edits = Object.fromEntries(
+      Object.entries(this.edits).filter(([name]) => this.saves(name as SettingName)),
+    );
     this.findingOptimal = "idle";
     this.forgetOutcome();
   }
@@ -400,7 +423,46 @@ export class MowPlannerCard extends LitElement {
       ([name, value]) => value !== shown[name as SettingName] && !locked.includes(name as SettingName),
     );
     this.edits = { ...this.edits, ...Object.fromEntries(changed) };
+    this.saveError = undefined;
+    for (const [name, value] of changed) {
+      const write =
+        this.saves(name as SettingName) && this.mower && settingWrite(this.mower, name as SettingName, value);
+      if (write) this.writer.write(write.entityId, write);
+    }
     this.forgetOutcome();
+  }
+
+  /** Whether a change to `name` is saved to its planning entity rather than kept in the card. */
+  private saves(name: SettingName): boolean {
+    return !this.job && Boolean(this.mower?.settingEntities?.[name]);
+  }
+
+  /** Shows the user's value until its entity holds it, so an older state never flips a control back. */
+  private dropSavedEdits(): void {
+    const { mower } = this;
+    const entities = mower?.settingEntities;
+    if (!mower || !entities || this.job) return;
+    const kept = Object.entries(this.edits).filter(([name, value]) => {
+      const entityId = entities[name as SettingName];
+      return !entityId || this.writer.pending(entityId) || mower.settings[name as SettingName] !== value;
+    });
+    if (kept.length < Object.keys(this.edits).length) this.edits = Object.fromEntries(kept);
+  }
+
+  private saved(entityId: string, error?: unknown): void {
+    const entities = this.mower?.settingEntities ?? {};
+    const name = (Object.keys(entities) as SettingName[]).find((setting) => entities[setting] === entityId);
+    if (!name) return;
+    if (error === undefined) {
+      this.dropSavedEdits();
+      return;
+    }
+    this.edits = Object.fromEntries(Object.entries(this.edits).filter(([setting]) => setting !== name));
+    const reason =
+      typeof error === "object" && error !== null && "message" in error ? String(error.message) : "";
+    this.saveError = [this.t("save.failed", { setting: this.t(SETTING_LABELS[name]) }), reason]
+      .filter(Boolean)
+      .join(". ");
   }
 
   private goTo(step: Step): void {
@@ -949,6 +1011,13 @@ export class MowPlannerCard extends LitElement {
             : nothing
         }
         ${blocked ? this.renderAlert("error", blocker, mower) : nothing}
+        ${
+          this.saveError
+            ? html`<p class="alert error" role="alert">
+                ${this.renderIcon(mdiAlertOutline)} ${this.saveError}
+              </p>`
+            : nothing
+        }
         ${
           step === "review" && !blocker && request.status === "idle" && this.active && !this.job
             ? this.renderAlert("warning", "warn.active_job", mower)

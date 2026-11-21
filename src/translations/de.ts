@@ -136,4 +136,5 @@ export const de: Record<keyof typeof en, string> = {
   "action.confirm_optimal": "Mäher fragen",
   "review.mower_value": "Einstellung des Mähers",
   "optimal.unsupported": "Dafür ist die Mammotion-Integration 0.6.24 oder neuer nötig",
+  "save.failed": "{setting} konnte nicht gespeichert werden",
 };
