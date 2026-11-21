@@ -236,6 +236,18 @@ describe("previewArea direction modes", () => {
     for (const seg of preview.stripes) nearAngle(deg(seg), 30);
   });
 
+  it("uses the mower's planned optimal direction in relative mode, exactly, plus the angle", () => {
+    const relative = settings({ angleMode: "relative_angle", angle: 10 });
+    const preview = previewArea(rotated(30), [], relative, 15, 75);
+    nearAngle(preview.directionDeg, 85);
+    expect(preview.directionExact).toBe(true);
+    for (const seg of preview.stripes) nearAngle(deg(seg), 85);
+    expect(previewArea(field, [], { ...relative, pattern: "segment_grid" }, 0, 75).directionExact).toBe(
+      false,
+    );
+    expect(previewArea(field, [], settings(), 0, 75).directionDeg).toBe(0);
+  });
+
   it("applies the angle offset only to absolute mode", () => {
     const absolute = previewArea(field, [], settings(), 15);
     expect(absolute.directionDeg).toBe(15);

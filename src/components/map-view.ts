@@ -15,7 +15,7 @@ import {
   previewShape,
   ringPath,
   ringWidth,
-  stripeStep,
+  passesPerBand,
   toScreen,
   type Insets,
   type PreviewShape,
@@ -32,8 +32,8 @@ export interface MapStrings {
   readonly noGoZone: string;
   /** Accessible name of an area; `order` is its 1-based mowing position when selected. */
   readonly area: (area: { name: string; areaM2: number; order?: number }) => string;
-  /** Shown while pass lines are too dense on screen and only every `n`-th one is drawn. */
-  readonly everyNthPass: (n: number) => string;
+  /** Shown while one pass is too thin to see and each mown band stands for `n` passes. */
+  readonly passesPerBand: (n: number) => string;
 }
 
 interface AreaShape {
@@ -126,7 +126,7 @@ export class MowMap extends LitElement {
     }
     if (changed.has("previews") || changed.has("view")) {
       this.previewShapes = this.previews.map((preview, i) => {
-        const step = stripeStep(preview.pitchM, this.view.scale);
+        const step = passesPerBand(preview.pitchM, this.view.scale);
         const drawn = changed.has("previews") ? undefined : this.previewShapes[i];
         return drawn?.step === step ? drawn : previewShape(preview, step);
       });
@@ -156,7 +156,7 @@ export class MowMap extends LitElement {
         .filter(({ shape }) => shape.stripes || shape.crossingStripes)
         .map(({ shape }) => shape.step),
     );
-    const notes = [thinning > 1 ? strings.everyNthPass(thinning) : "", this.note ?? ""].filter(Boolean);
+    const notes = [thinning > 1 ? strings.passesPerBand(thinning) : "", this.note ?? ""].filter(Boolean);
     const mower = this.mower && toScreen(this.view, this.mower.position);
     return html`
       <svg
@@ -171,9 +171,14 @@ export class MowMap extends LitElement {
         <g class="viewport" @panzoomchange=${this.onViewChange}>
           <defs>
             ${this.areaShapes.map(({ d }, i) => svg`<clipPath id="clip-${i}"><path d=${d} /></clipPath>`)}
+            ${previews.map(
+              ({ shape }, i) =>
+                svg`<clipPath id="band-${i}"><path clip-rule="evenodd" d=${shape.region} /></clipPath>`,
+            )}
           </defs>
           <path class="channels" d=${model.channels.map(polylinePath).join("")} />
           ${this.areaShapes.map(({ zone, d }) => this.renderArea(strings, zone, d, order.get(zone.hash)))}
+          ${this.routePath ? nothing : previews.map(({ shape }, i) => this.renderBands(shape, i))}
           ${model.obstacles.map(
             (zone) =>
               svg`<path class="nogo" role="img" aria-label="${strings.noGoZone}: ${zone.name}" d=${ringPath(zone.outline)} />`,
@@ -181,7 +186,7 @@ export class MowMap extends LitElement {
           ${
             this.routePath
               ? svg`<path class="route" d=${this.routePath} />`
-              : previews.map(({ shape, clip }) => this.renderPreview(shape, clip))
+              : previews.map(({ shape, clip }) => this.renderLaps(shape, clip))
           }
         </g>
         <g class="overlay">
@@ -218,12 +223,18 @@ export class MowMap extends LitElement {
         />`;
   }
 
-  private renderPreview(shape: PreviewShape, clip: number) {
-    return svg`<g class="preview" clip-path="url(#clip-${clip})">
-      <path class="stripes" d=${shape.stripes} />
-      ${shape.crossingStripes ? svg`<path class="stripes crossing" d=${shape.crossingStripes} />` : nothing}
-      <path class="laps" d=${`${shape.laps}${shape.obstacleLaps}`} />
+  /** Mown bands below the no-go zones, trimmed to the mown region; two passes overlap into a check. */
+  private renderBands(shape: PreviewShape, index: number) {
+    const width = `stroke-width: ${shape.bandWidthM}px`;
+    return svg`<g class="preview" clip-path="url(#band-${index})">
+      <path class="stripes" style=${width} d=${shape.stripes} />
+      ${shape.crossingStripes ? svg`<path class="stripes crossing" style=${width} d=${shape.crossingStripes} />` : nothing}
     </g>`;
+  }
+
+  /** Laps on top of everything, so they stay readable over the bands. */
+  private renderLaps(shape: PreviewShape, clip: number) {
+    return svg`<path class="laps" clip-path="url(#clip-${clip})" d=${`${shape.laps}${shape.obstacleLaps}`} />`;
   }
 
   private renderLabel({ zone, label, widthM }: AreaShape, order: number | undefined, mower?: Point) {
@@ -524,11 +535,9 @@ export class MowMap extends LitElement {
         stroke-width: 1.5;
       }
       .viewport .stripes {
-        stroke: color-mix(in srgb, var(--mmp-path-color) 45%, var(--mmp-area-color));
-        stroke-width: 1;
-      }
-      .viewport .stripes.crossing {
-        stroke: color-mix(in srgb, var(--mmp-path-color) 28%, var(--mmp-area-color));
+        vector-effect: none;
+        stroke: color-mix(in srgb, var(--mmp-selected-color) 42%, transparent);
+        stroke-linecap: butt;
       }
       .viewport .laps {
         stroke: color-mix(in srgb, var(--mmp-path-color) 75%, var(--mmp-area-color));

@@ -21,21 +21,28 @@ const PRECISION = 3;
 const ARC_TOLERANCE_M = 0.01;
 const MAX_LINES_PER_FAMILY = 20_000;
 
-/** The pattern the mower would cut over `area` with `settings`, avoiding `obstacles`. */
+/**
+ * The pattern the mower would cut over `area` with `settings`, avoiding `obstacles`.
+ * `optimalDeg` is the direction the mower chose for the area in Optimal mode, when known from its plan.
+ */
 export function previewArea(
   area: Zone,
   obstacles: readonly Zone[],
   settings: MowSettings,
   angleOffsetDeg = 0,
+  optimalDeg?: number,
 ): AreaPreview {
   const pitch = settings.spacingCm / 100;
   const boundary = [toPath(area.outline)];
-  const directionDeg = normalise(baseDirection(area, settings, angleOffsetDeg));
-  const directionExact = settings.angleMode === "absolute_angle" && settings.pattern !== "segment_grid";
+  const directionDeg = normalise(baseDirection(area, settings, angleOffsetDeg, optimalDeg));
+  const known =
+    settings.angleMode === "absolute_angle" ||
+    (settings.angleMode === "relative_angle" && optimalDeg !== undefined);
+  const directionExact = known && settings.pattern !== "segment_grid";
   const validPitch = Number.isFinite(pitch) && pitch > 0;
   const preview = { hash: area.hash, directionDeg, directionExact, pitchM: validPitch ? pitch : 0 };
   if (!(validPitch && Math.abs(areaD(boundary[0] ?? [])) > 1e-6)) {
-    return { ...preview, perimeterLaps: [], obstacleLaps: [], stripes: [], lengthM: 0 };
+    return { ...preview, perimeterLaps: [], obstacleLaps: [], region: [], stripes: [], lengthM: 0 };
   }
 
   const inflate = (paths: PathsD, delta: number) =>
@@ -76,15 +83,20 @@ export function previewArea(
   const lengthM =
     stripes.reduce((sum, { from, to }) => sum + distance(from, to), 0) +
     [...perimeterLaps, ...obstacleLaps].reduce((sum, ring) => sum + perimeterOf(ring), 0);
-  return { ...preview, perimeterLaps, obstacleLaps, stripes, lengthM };
+  return { ...preview, perimeterLaps, obstacleLaps, region: region.map(toRing), stripes, lengthM };
 }
 
-function baseDirection(area: Zone, settings: MowSettings, angleOffsetDeg: number): number {
+function baseDirection(
+  area: Zone,
+  settings: MowSettings,
+  angleOffsetDeg: number,
+  optimalDeg?: number,
+): number {
   switch (settings.angleMode) {
     case "absolute_angle":
       return settings.angle + angleOffsetDeg;
     case "relative_angle":
-      return longAxisDeg(area.outline) + settings.angle;
+      return (optimalDeg ?? longAxisDeg(area.outline)) + settings.angle;
     case "random_angle":
       return hashDeg(area.hash);
   }

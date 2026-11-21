@@ -1,6 +1,6 @@
 import { defineOnce } from "../define";
 import { mdiAngleAcute, mdiAutoFix, mdiChevronDown, mdiShuffleVariant } from "@mdi/js";
-import { css, html, LitElement, nothing, svg } from "lit";
+import { css, html, LitElement, nothing } from "lit";
 import { property } from "lit/decorators.js";
 import { localize, type StringKey } from "../localize";
 import {
@@ -15,6 +15,8 @@ import {
   type SwitchSetting,
 } from "../model";
 import { controlStyles } from "../styles";
+import "./control-dial";
+import type { DialHand } from "./control-dial";
 import "./control-segmented";
 import type { SegmentOption, SegmentValue } from "./control-segmented";
 import "./control-slider";
@@ -28,15 +30,8 @@ const angleModeIcons: Readonly<Record<AngleMode, string>> = {
 
 const EDGE_CHOICES = [0, 0.5] as const;
 
-const DIAL_RADIUS = 27;
-const STRIPE_RADIUS = 20;
-const dialStripes = [-14, -7, 0, 7, 14].map((y) => {
-  const x = Math.sqrt(STRIPE_RADIUS ** 2 - y ** 2);
-  return svg`<line x1=${-x} y1=${y} x2=${x} y2=${y}></line>`;
-});
-const dialTicks = svg`<g class="ticks">${[0, 90, 180, 270].map(
-  (angle) => svg`<line y1=${-DIAL_RADIUS} y2=${4 - DIAL_RADIUS} transform="rotate(${angle})"></line>`,
-)}</g>`;
+/** Where the Optimal direction stands: guessed by the card, being asked of the mower, or taken from its plan. */
+export type OptimalState = "approximate" | "finding" | "found" | "failed";
 
 const SWITCH_LABELS: Readonly<Record<SwitchSetting, StringKey>> = {
   autoChangeDirection: "settings.auto_change_direction",
@@ -55,6 +50,10 @@ export class MowSettingsPanel extends LitElement {
   @property({ attribute: false }) disabled = false;
   /** Settings shown but not editable; while any are, More settings starts open. */
   @property({ attribute: false }) locked: readonly SettingName[] = [];
+  /** Map direction an angle of 0 points along, for the dial. */
+  @property({ attribute: false }) angleBase = 0;
+  /** Offers finding the Optimal direction from a plan when set; fires `find-optimal`. */
+  @property({ attribute: false }) optimal?: OptimalState;
 
   static override styles = [
     controlStyles,
@@ -72,40 +71,34 @@ export class MowSettingsPanel extends LitElement {
       .help {
         margin: 0;
       }
-      .angle {
+      .angles {
         display: flex;
         align-items: center;
         gap: var(--ha-space-3, 12px);
       }
-      .angle mow-planner-slider {
+      .sliders {
+        display: flex;
+        flex-direction: column;
+        gap: var(--ha-space-3, 12px);
         flex: 1;
         min-width: 0;
       }
-      .dial {
-        width: 56px;
-        height: 56px;
-        flex: none;
-        stroke-linecap: round;
+      .optimal {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--ha-space-1, 4px) var(--ha-space-3, 12px);
+        margin: 0;
       }
-      .dial circle {
-        fill: var(--mmp-surface);
-        stroke: var(--divider-color, rgba(0, 0, 0, 0.12));
+      .optimal button {
+        min-height: 32px;
+        padding-inline: var(--ha-space-2, 8px);
+        border-radius: var(--mmp-radius);
+        color: var(--mmp-accent);
+        font-weight: var(--ha-font-weight-medium, 500);
       }
-      .dial .ticks,
-      .dial .baseline {
-        stroke: var(--secondary-text-color, #727272);
-        stroke-width: 1.5;
-        opacity: 0.6;
-      }
-      .dial .baseline {
-        stroke-dasharray: 3 3;
-      }
-      .dial .stripes {
-        stroke: var(--mmp-accent);
-        stroke-width: 2.5;
-      }
-      .dial.off .stripes {
-        stroke: var(--disabled-text-color, #9e9e9e);
+      .optimal button:hover:not(:disabled) {
+        background: var(--mmp-tint);
       }
       summary {
         display: flex;
@@ -155,18 +148,6 @@ export class MowSettingsPanel extends LitElement {
         s.pattern,
       )}
       ${perimeterOnly ? nothing : this.renderAngle()}
-      ${
-        s.pattern === "double_grid"
-          ? this.slider(
-              "crossAngle",
-              "settings.cross_angle",
-              l.crossAngle,
-              s.crossAngle,
-              (v) => this.degrees(v),
-              90,
-            )
-          : nothing
-      }
       ${this.slider("spacingCm", "settings.spacing", l.spacingCm, s.spacingCm, (v) => this.unit("unit.cm", v))}
       ${this.segmented("perimeterLaps", "settings.perimeter_laps", this.laps(l.maxPerimeterLaps), s.perimeterLaps)}
       ${this.segmented("obstacleLaps", "settings.obstacle_laps", this.laps(l.maxObstacleLaps), s.obstacleLaps)}
@@ -245,41 +226,76 @@ export class MowSettingsPanel extends LitElement {
   }
 
   private renderAngle() {
-    const { angleMode, angle } = this.settings;
-    const modes = ANGLE_MODES.filter((mode) => this.limits.angleModes.includes(mode)).map((mode) => ({
+    const { settings: s, limits: l } = this;
+    const modes = ANGLE_MODES.filter((mode) => l.angleModes.includes(mode)).map((mode) => ({
       value: mode,
       label: this.t(`angle_mode.${mode}`),
       icon: mdiIcon(angleModeIcons[mode]),
     }));
     const format =
-      angleMode === "relative_angle"
+      s.angleMode === "relative_angle"
         ? (v: number) => this.t("angle.offset", { value: this.number(v, 0, "exceptZero") })
         : (v: number) => this.degrees(v);
-    return html`${this.segmented("angleMode", "settings.angle", modes, angleMode, [
-      html`<p class="help secondary">${this.t(`angle_help.${angleMode}`)}</p>`,
+    const crossing = s.pattern === "double_grid";
+    const cross = crossing
+      ? this.slider(
+          "crossAngle",
+          "settings.cross_angle",
+          l.crossAngle,
+          s.crossAngle,
+          (v) => this.degrees(v),
+          90,
+        )
+      : nothing;
+    return html`${this.segmented("angleMode", "settings.angle", modes, s.angleMode, [
+      html`<p class="help secondary">${this.t(`angle_help.${s.angleMode}`)}</p>`,
+      s.angleMode === "relative_angle" ? this.renderOptimal() : nothing,
     ])}
     ${
-      angleMode === "random_angle"
-        ? nothing
-        : html`<div class="angle">
-            ${this.slider("angle", "settings.angle_value", this.limits.angle, angle, format, 0)}
-            <svg
-              class="dial ${this.isLocked("angle") ? "off" : ""}"
-              viewBox="-30 -30 60 60"
-              aria-hidden="true"
-            >
-              <circle r=${DIAL_RADIUS}></circle>
-              ${
-                angleMode === "relative_angle"
-                  ? svg`<line class="baseline" x1=${-DIAL_RADIUS} x2=${DIAL_RADIUS}>
-                      <title>${this.t("angle.optimal_direction")}</title>
-                    </line>`
-                  : dialTicks
-              }
-              <g class="stripes" transform="rotate(${-angle})">${dialStripes}</g>
-            </svg>
+      s.angleMode === "random_angle"
+        ? cross
+        : html`<div class="angles">
+            <div class="sliders">
+              ${this.slider("angle", "settings.angle_value", l.angle, s.angle, format, 0)} ${cross}
+            </div>
+            <mow-planner-dial
+              .angle=${s.angle}
+              .crossAngle=${crossing ? s.crossAngle : undefined}
+              .base=${this.angleBase}
+              .reference=${s.angleMode === "relative_angle"}
+              .angleRange=${l.angle}
+              .crossRange=${l.crossAngle}
+              .angleLabel=${this.t("settings.angle_value")}
+              .crossLabel=${this.t("settings.cross_angle")}
+              .format=${(v: number) => this.degrees(v)}
+              .disabled=${this.isLocked("angle") || this.isLocked("crossAngle")}
+              @value-changed=${(event: CustomEvent<{ hand: DialHand; value: number }>) => {
+                this.emit(event.detail.hand, event.detail.value);
+              }}
+            ></mow-planner-dial>
           </div>`
     }`;
+  }
+
+  private renderOptimal() {
+    const { optimal } = this;
+    if (!optimal) return nothing;
+    return html`<p class="optimal secondary" role="status">
+      ${this.t(`optimal.${optimal}`)}
+      ${
+        optimal === "approximate" || optimal === "failed"
+          ? html`<button
+              type="button"
+              ?disabled=${this.disabled}
+              @click=${() => {
+                this.dispatchEvent(new CustomEvent("find-optimal", { bubbles: true, composed: true }));
+              }}
+            >
+              ${this.t("optimal.find")}
+            </button>`
+          : nothing
+      }
+    </p>`;
   }
 
   private renderEdge() {

@@ -12,7 +12,7 @@ const strings: MapStrings = {
   noGoZone: "No-go zone",
   area: ({ name, areaM2, order }) =>
     `${name}, ${Math.round(areaM2)} m²${order ? `, selected, position ${order}` : ""}`,
-  everyNthPass: (n) => `Every ${n}. pass shown`,
+  passesPerBand: (n) => `Each band is ${n} passes`,
 };
 
 const rect = (x0: number, y0: number, x1: number, y1: number): Ring => [
@@ -50,6 +50,7 @@ const preview: AreaPreview = {
   directionExact: true,
   perimeterLaps: [rect(2.2, -9.8, 19.8, 9.8)],
   obstacleLaps: [],
+  region: [rect(2.5, -9.5, 19.5, 9.5)],
   stripes: [stripe(0, 1), stripe(1, 1), stripe(2, 1)],
   pitchM: 1,
   lengthM: 48,
@@ -299,32 +300,54 @@ describe("mow-planner-map", () => {
     expect(root(map).querySelector("[data-hash][tabindex]")).toBeNull();
   });
 
-  it("draws previews as one path per layer with a segment per stripe", async () => {
+  it("draws every other pass as a dark band one pass wide, in one path", async () => {
     const map = await renderMap({ previews: [preview] }, [400, 300]);
     await settle(map);
     const previews = root(map).querySelectorAll(".preview");
     expect(previews).toHaveLength(1);
-    expect(countMoves(root(map).querySelector(".stripes")?.getAttribute("d") ?? null)).toBe(3);
+    expect(countMoves(root(map).querySelector(".stripes")?.getAttribute("d") ?? null)).toBe(2);
+    expect(root(map).querySelector<SVGPathElement>(".stripes")?.style.strokeWidth).toBe("1px");
     expect(countMoves(root(map).querySelector(".laps")?.getAttribute("d") ?? null)).toBe(1);
     expect(root(map).querySelector(".route")).toBeNull();
   });
 
-  it("draws only every n-th pass line while lines are dense on screen, all of them once zoomed in", async () => {
+  it("groups passes into wider bands while one is too thin to see, one pass per band once zoomed in", async () => {
     const map = await renderMap({ previews: [densePreview] }, [400, 300]);
     await settle(map);
     const drawnLines = () => {
       const d = root(map).querySelector(".stripes")?.getAttribute("d") ?? "";
       return [...d.matchAll(/M[\d.-]+ ([\d.-]+)/g)].map(([, y]) => Math.round((Number(y) * -1 + 9) / 0.25));
     };
-    expect(drawnLines()).toEqual(Array.from({ length: 14 }, (_, i) => 3 * i));
-    expect(root(map).querySelector(".stripes")?.getAttribute("opacity")).toBeNull();
+    const width = () => root(map).querySelector<SVGPathElement>(".stripes")?.style.strokeWidth;
+    expect(drawnLines()).toEqual(Array.from({ length: 7 }, (_, i) => 6 * i));
+    expect(width()).toBe("0.75px");
 
     await resize(map, 4000, 3000);
-    expect(drawnLines()).toEqual(Array.from({ length: 40 }, (_, i) => i));
+    expect(drawnLines()).toEqual(Array.from({ length: 20 }, (_, i) => 2 * i));
+    expect(width()).toBe("0.25px");
   });
 
-  it("draws the crossing pass as its own path", async () => {
-    const crossing = { ...preview, stripes: [stripe(0, 1), stripe(1, 1, 1), stripe(2, 1, 1)] };
+  it("trims the bands to the mown region, running each past it so its ends follow the region's edge", async () => {
+    const map = await renderMap({ previews: [preview] }, [400, 300]);
+    await settle(map);
+    const group = root(map).querySelector(".preview");
+    const clip = root(map).querySelector(
+      `clipPath#${group?.getAttribute("clip-path")?.match(/#([\w-]+)/)?.[1] ?? "none"} path`,
+    );
+    expect(clip?.getAttribute("d")).toBe("M2.5 9.5L19.5 9.5L19.5 -9.5L2.5 -9.5Z");
+    expect(clip?.getAttribute("clip-rule")).toBe("evenodd");
+    const xs = [
+      ...(root(map).querySelector(".stripes")?.getAttribute("d") ?? "").matchAll(/[ML]([\d.-]+)/g),
+    ].map(([, x]) => Number(x));
+    expect(Math.min(...xs)).toBeLessThan(2.5);
+    expect(Math.max(...xs)).toBeGreaterThan(19.5);
+  });
+
+  it("draws the crossing pass as its own band path, so the two overlap into a check", async () => {
+    const crossing = {
+      ...preview,
+      stripes: [stripe(0, 1), stripe(0, 1, 1), stripe(1, 1, 1), stripe(2, 1, 1)],
+    };
     const map = await renderMap({ previews: [crossing] }, [400, 300]);
     await settle(map);
     expect(countMoves(root(map).querySelector(".stripes:not(.crossing)")?.getAttribute("d") ?? null)).toBe(1);
@@ -477,7 +500,7 @@ describe("mow-planner-map", () => {
   it("says when only every n-th pass line is drawn", async () => {
     const map = await renderMap({ previews: [densePreview] }, [400, 300]);
     expect(caption(map).getAttribute("role")).toBe("note");
-    expect(captionLines(map)).toEqual(["Every 3. pass shown"]);
+    expect(captionLines(map)).toEqual(["Each band is 3 passes"]);
     expect(getComputedStyle(caption(map)).pointerEvents).toBe("none");
 
     await resize(map, 4000, 3000);
@@ -494,7 +517,7 @@ describe("mow-planner-map", () => {
     const lapsOnly: AreaPreview = { ...preview, hash: 101, stripes: [], pitchM: 0.01 };
     const unknown: AreaPreview = { ...densePreview, hash: 999, pitchM: 0.01 };
     const map = await renderMap({ previews: [densePreview, fine, unknown] }, [400, 300]);
-    expect(captionLines(map)).toEqual(["Every 7. pass shown"]);
+    expect(captionLines(map)).toEqual(["Each band is 7 passes"]);
 
     map.previews = [preview, lapsOnly];
     await settle(map);
@@ -503,7 +526,7 @@ describe("mow-planner-map", () => {
 
   it("shows the note in the caption, below the thinning line", async () => {
     const map = await renderMap({ previews: [densePreview], note: "Preview is approximate" }, [400, 300]);
-    expect(captionLines(map)).toEqual(["Every 3. pass shown", "Preview is approximate"]);
+    expect(captionLines(map)).toEqual(["Each band is 3 passes", "Preview is approximate"]);
   });
 
   it("drops the thinning line when the exact route is drawn", async () => {

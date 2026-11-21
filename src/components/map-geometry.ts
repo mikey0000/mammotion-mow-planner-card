@@ -1,3 +1,4 @@
+import { boundsOf } from "../geo/bounds";
 import type { AreaPreview, Bounds, MapModel, Point, Ring, Stripe } from "../model";
 
 /** Panzoom transform: screen = scale * (svg point + pan). SVG points are metres with y flipped. */
@@ -11,13 +12,18 @@ export interface PreviewShape {
   readonly hash: number;
   readonly laps: string;
   readonly obstacleLaps: string;
-  /** Only every `step`-th pass line is drawn. */
+  /** Passes grouped into one mown band. */
   readonly step: number;
+  /** Width of a band in metres. */
+  readonly bandWidthM: number;
+  /** Centre lines of every other band; drawn `bandWidthM` wide, the gaps between them are the light bands. */
   readonly stripes: string;
   readonly crossingStripes: string;
+  /** Clips the bands, which run past it so their ends follow its edge. */
+  readonly region: string;
 }
 
-const MIN_STRIPE_PITCH_PX = 5;
+const MIN_BAND_PX = 5;
 
 const round = (v: number) => Math.round(v * 100) / 100;
 const point = ({ x, y }: Point) => `${round(x)} ${round(-y)}`;
@@ -75,23 +81,44 @@ export const ringWidth = (ring: Ring) => {
   return xs.length ? Math.max(...xs) - Math.min(...xs) : 0;
 };
 
-/** Smallest n such that drawing every n-th pass line keeps them a comfortable distance apart on screen. */
-export const stripeStep = (pitchM: number, scale: number) => {
+/** Smallest number of passes per band that keeps a band wide enough to see on screen. */
+export const passesPerBand = (pitchM: number, scale: number) => {
   const pitchPx = pitchM * scale;
-  return pitchPx > 0 ? Math.max(1, Math.ceil(MIN_STRIPE_PITCH_PX / pitchPx)) : 1;
+  return pitchPx > 0 ? Math.max(1, Math.ceil(MIN_BAND_PX / pitchPx)) : 1;
 };
 
-const stripePath = (stripes: readonly Stripe[]) =>
-  stripes.map(({ from, to }) => polylinePath([from, to])).join("");
+/** Each stripe lengthened by `reach` at both ends along its own line, which the region clip then trims. */
+const stripePath = (stripes: readonly Stripe[], reach: number) =>
+  stripes
+    .map(({ from, to }) => {
+      const length = Math.hypot(to.x - from.x, to.y - from.y) || 1;
+      const [dx, dy] = [((to.x - from.x) / length) * reach, ((to.y - from.y) / length) * reach];
+      return polylinePath([
+        { x: from.x - dx, y: from.y - dy },
+        { x: to.x + dx, y: to.y + dy },
+      ]);
+    })
+    .join("");
 
 export function previewShape(preview: AreaPreview, step: number): PreviewShape {
-  const shown = preview.stripes.filter(({ line }) => line % step === 0);
+  const shown = preview.stripes.filter(({ line }) => line % (2 * step) === 0);
+  const corners = preview.region.flat();
+  const box = corners.length ? boundsOf(corners) : undefined;
+  const reach = box ? Math.hypot(box.maxX - box.minX, box.maxY - box.minY) : 0;
   return {
     hash: preview.hash,
     laps: preview.perimeterLaps.map(ringPath).join(""),
     obstacleLaps: preview.obstacleLaps.map(ringPath).join(""),
     step,
-    stripes: stripePath(shown.filter(({ pass }) => pass === 0)),
-    crossingStripes: stripePath(shown.filter(({ pass }) => pass === 1)),
+    bandWidthM: step * preview.pitchM,
+    stripes: stripePath(
+      shown.filter(({ pass }) => pass === 0),
+      reach,
+    ),
+    crossingStripes: stripePath(
+      shown.filter(({ pass }) => pass === 1),
+      reach,
+    ),
+    region: preview.region.map(ringPath).join(""),
   };
 }

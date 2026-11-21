@@ -11,10 +11,12 @@ import { css, html, LitElement, nothing, type PropertyValues, type TemplateResul
 import { state } from "lit/decorators.js";
 import "./components/map-view";
 import "./components/settings-panel";
+import type { OptimalState } from "./components/settings-panel";
 import { mdiIcon } from "./components/icons";
 import type { MapStrings } from "./components/map-view";
 import { CARD_TYPE, configForm, normalizeConfig, stubConfig, type CardConfig } from "./config";
 import { defineOnce } from "./define";
+import { plannedDirections } from "./geo/direction";
 import { previewArea } from "./geo/preview";
 import { projectMap, projectPosition } from "./geo/project";
 import {
@@ -42,8 +44,8 @@ type Step = (typeof STEPS)[number];
 type MapState =
   { readonly status: "loading" | "empty" | "error" } | { readonly status: "ready"; readonly model: MapModel };
 
-/** `start` a new job, plan a `route` without mowing, or `modify` the running job. */
-type PlanKind = "start" | "route" | "modify";
+/** `start` a new job, plan a `route` without mowing, plan to learn the `optimal` direction, or `modify` the running job. */
+type PlanKind = "start" | "route" | "optimal" | "modify";
 
 /** What the user was shown when asked to confirm; exactly this is sent. */
 interface Plan {
@@ -74,6 +76,7 @@ const CONFIRM_ARM_MS = 600;
 const PLAN_LABELS: Readonly<Record<PlanKind, { readonly title: StringKey; readonly confirm: StringKey }>> = {
   start: { title: "action.start", confirm: "action.confirm_start" },
   route: { title: "preview.exact_route", confirm: "action.confirm_route" },
+  optimal: { title: "optimal.find", confirm: "action.confirm_optimal" },
   modify: { title: "action.apply", confirm: "action.confirm_apply" },
 };
 
@@ -109,6 +112,8 @@ function withSwitchNames(model: MapModel, switches: readonly AreaSwitch[]): MapM
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const NO_DIRECTIONS: ReadonlyMap<number, number> = new Map();
+
 export class MowPlannerCard extends LitElement {
   static getConfigForm = () => configForm;
   static getStubConfig = stubConfig;
@@ -125,6 +130,9 @@ export class MowPlannerCard extends LitElement {
   @state() private previews: readonly AreaPreview[] = [];
   @state() private route: RouteState = IDLE;
   @state() private request: Request = IDLE;
+  /** Per mower, the Optimal direction of each area the mower has planned, by area hash. */
+  @state() private optimalDirections: ReadonlyMap<string, ReadonlyMap<number, number>> = new Map();
+  @state() private findingOptimal: "idle" | "finding" | "failed" = "idle";
 
   private latestHass?: HomeAssistant;
   private mowerSnapshot = "";
@@ -195,7 +203,29 @@ export class MowPlannerCard extends LitElement {
   }
 
   private get busy(): boolean {
-    return this.request.status === "sending" || this.route.status === "loading";
+    return (
+      this.request.status === "sending" ||
+      this.route.status === "loading" ||
+      this.findingOptimal === "finding"
+    );
+  }
+
+  private get directions(): ReadonlyMap<number, number> {
+    return this.optimalDirections.get(this.mowerId ?? "") ?? NO_DIRECTIONS;
+  }
+
+  /** Where the dial's 0 points: the planned Optimal direction of the first area, or the configured offset. */
+  private get angleBase(): number {
+    if (this.settings?.angleMode !== "relative_angle") return this.config?.angle_offset ?? 0;
+    return this.directions.get(this.selectedAreas[0]?.hash ?? Number.NaN) ?? 0;
+  }
+
+  private get optimalState(): OptimalState | undefined {
+    const selected = this.selectedAreas;
+    if (this.findingOptimal === "finding") return "finding";
+    if (selected.length > 0 && selected.every((area) => this.directions.has(area.hash))) return "found";
+    if (this.refuses("optimal") || this.map.status !== "ready") return undefined;
+    return this.findingOptimal === "failed" ? "failed" : "approximate";
   }
 
   private get active(): boolean {
@@ -224,7 +254,7 @@ export class MowPlannerCard extends LitElement {
   private refuses(kind: PlanKind): boolean {
     if (this.blocker) return true;
     if (kind === "modify") return !this.job || this.jobEdits.length === 0;
-    return Boolean(this.job) || (kind === "route" && this.active);
+    return Boolean(this.job) || (kind !== "start" && this.active);
   }
 
   private get pathLengthM(): number {
@@ -274,6 +304,7 @@ export class MowPlannerCard extends LitElement {
     this.step = "areas";
     this.pickedHashes = undefined;
     this.edits = {};
+    this.findingOptimal = "idle";
     this.forgetOutcome();
   }
 
@@ -289,14 +320,15 @@ export class MowPlannerCard extends LitElement {
     const hashes = this.selectedAreas.map((area) => area.hash);
     const offset = this.config?.angle_offset ?? 0;
     const model = map.status === "ready" ? map.model : undefined;
-    const key = JSON.stringify([hashes, settings, offset, model?.origin, model?.bounds]);
+    const directions = this.directions;
+    const key = JSON.stringify([hashes, settings, offset, model?.origin, model?.bounds, [...directions]]);
     if (key === this.previewKey) return;
     this.previewKey = key;
     this.previews =
       model && settings
         ? hashes.flatMap((hash) => {
             const area = model.areas.find((zone) => zone.hash === hash);
-            return area ? previewArea(area, model.obstacles, settings, offset) : [];
+            return area ? previewArea(area, model.obstacles, settings, offset, directions.get(hash)) : [];
           })
         : [];
   }
@@ -306,6 +338,7 @@ export class MowPlannerCard extends LitElement {
     const areas = this.mower?.areas;
     if (!mowerId || !hass || !areas) return;
     const loaded = refresh ? undefined : this.loadedMaps.get(mowerId);
+    if (refresh) this.forgetDirections(mowerId);
     if (loaded) {
       this.map = loaded;
       return;
@@ -328,6 +361,7 @@ export class MowPlannerCard extends LitElement {
     if (this.busy || this.job || !this.mower?.areas.some((area) => area.hash === hash)) return;
     const hashes = this.selectedAreas.map((area) => area.hash);
     this.pickedHashes = hashes.includes(hash) ? hashes.filter((h) => h !== hash) : [...hashes, hash];
+    this.findingOptimal = "idle";
     this.forgetOutcome();
   }
 
@@ -337,6 +371,7 @@ export class MowPlannerCard extends LitElement {
     const picked = this.selectedAreas.map((area) => area.hash);
     this.pickedHashes =
       picked.length === all.length ? [] : [...picked, ...all.filter((hash) => !picked.includes(hash))];
+    this.findingOptimal = "idle";
     this.forgetOutcome();
   }
 
@@ -379,17 +414,31 @@ export class MowPlannerCard extends LitElement {
             data: modifyJobData(settings, jobEdits),
             summary: jobEdits.map((name) => this.t(SETTING_LABELS[name])).join(", "),
           }
-        : {
-            mower,
-            kind,
-            data: startMowData(settings, this.sentSettings, areas, kind === "route"),
-            summary: this.totals.join(" · "),
-          };
+        : kind === "optimal"
+          ? {
+              mower,
+              kind,
+              data: this.optimalPlanData(settings, areas),
+              summary: "",
+            }
+          : {
+              mower,
+              kind,
+              data: startMowData(settings, this.sentSettings, areas, kind === "route"),
+              summary: this.totals.join(" · "),
+            };
     this.request = { status: "confirming", plan, armed: false };
     clearTimeout(this.armTimer);
     this.armTimer = setTimeout(() => {
       if (this.request.status === "confirming") this.request = { ...this.request, armed: true };
     }, CONFIRM_ARM_MS);
+  }
+
+  /** Plain stripes at no offset, so the route runs along the direction the mower considers optimal. */
+  private optimalPlanData(settings: MowSettings, areas: readonly string[]): Record<string, unknown> {
+    const plain: MowSettings = { ...settings, pattern: "single_grid", angleMode: "relative_angle", angle: 0 };
+    const names = new Set<SettingName>([...this.sentSettings, "pattern", "angleMode", "angle"]);
+    return startMowData(plain, [...names], areas, true);
   }
 
   private cancelConfirm(): void {
@@ -413,36 +462,80 @@ export class MowPlannerCard extends LitElement {
       this.request = IDLE;
       if (sent) await this.loadRoute(hass, plan.mower.entityId);
       else this.route = { status: "unavailable" };
+    } else if (plan.kind === "optimal") {
+      this.request = IDLE;
+      if (sent) await this.findOptimal(hass, plan.mower.entityId);
+      else this.findingOptimal = "failed";
     } else {
       this.request = { status: sent ? "sent" : "failed", plan };
     }
   }
 
+  /** Asks the mower for the route it last planned and polls until it arrives, or gives up. */
+  private async plannedLines(
+    hass: HomeAssistant,
+    mowerId: string,
+    origin: MapModel["origin"],
+    wanted: () => boolean,
+  ): Promise<(readonly Point[])[] | undefined> {
+    await requestPlannedRoute(hass, mowerId);
+    for (let poll = 0; poll < ROUTE_POLLS && wanted() && this.isConnected; poll++) {
+      await wait(ROUTE_POLL_MS);
+      const geojson = await fetchPlannedRoute(hass, mowerId);
+      const lines = geojson?.features.flatMap(({ geometry }) =>
+        geometry.type === "LineString"
+          ? [geometry.coordinates.map(([lon = 0, lat = 0]) => projectPosition(origin, lon, lat))]
+          : [],
+      );
+      if (lines?.length) return lines;
+    }
+    return undefined;
+  }
+
   private async loadRoute(hass: HomeAssistant, mowerId: string): Promise<void> {
     if (this.map.status !== "ready") return;
-    const { origin } = this.map.model;
     const loading: RouteState = { status: "loading" };
     this.route = loading;
     let route: RouteState = { status: "unavailable" };
     try {
-      await requestPlannedRoute(hass, mowerId);
-      for (let poll = 0; poll < ROUTE_POLLS && this.route === loading && this.isConnected; poll++) {
-        await wait(ROUTE_POLL_MS);
-        const geojson = await fetchPlannedRoute(hass, mowerId);
-        const lines = geojson?.features.flatMap(({ geometry }) =>
-          geometry.type === "LineString"
-            ? [geometry.coordinates.map(([lon = 0, lat = 0]) => projectPosition(origin, lon, lat))]
-            : [],
-        );
-        if (lines?.length) {
-          route = { status: "ready", lines };
-          break;
-        }
-      }
+      const lines = await this.plannedLines(
+        hass,
+        mowerId,
+        this.map.model.origin,
+        () => this.route === loading,
+      );
+      if (lines) route = { status: "ready", lines };
     } catch {
       route = { status: "unavailable" };
     }
     if (this.route === loading) this.route = route;
+  }
+
+  /** Reads the direction the mower planned for each selected area off its planned route. */
+  private async findOptimal(hass: HomeAssistant, mowerId: string): Promise<void> {
+    if (this.map.status !== "ready") return;
+    const { model } = this.map;
+    const areas = model.areas.filter((zone) => this.selectedAreas.some((area) => area.hash === zone.hash));
+    this.findingOptimal = "finding";
+    const wanted = () => this.findingOptimal === "finding";
+    let found: ReadonlyMap<number, number> = NO_DIRECTIONS;
+    try {
+      const lines = await this.plannedLines(hass, mowerId, model.origin, wanted);
+      if (lines) found = plannedDirections(lines, areas);
+    } catch {
+      found = NO_DIRECTIONS;
+    }
+    if (!wanted()) return;
+    this.findingOptimal = found.size > 0 ? "idle" : "failed";
+    const known = this.optimalDirections.get(mowerId) ?? NO_DIRECTIONS;
+    if (found.size > 0) {
+      this.optimalDirections = new Map([...this.optimalDirections, [mowerId, new Map([...known, ...found])]]);
+    }
+  }
+
+  private forgetDirections(mowerId: string): void {
+    const directions = new Map(this.optimalDirections);
+    if (directions.delete(mowerId)) this.optimalDirections = directions;
   }
 
   private get mapStrings(): MapStrings {
@@ -454,7 +547,7 @@ export class MowPlannerCard extends LitElement {
       dock: this.t("map.dock"),
       mower: this.t("map.mower"),
       noGoZone: this.t("map.no_go_zone"),
-      everyNthPass: (n) => this.t("map.thinned", { n }),
+      passesPerBand: (n) => this.t("map.bands", { n }),
       area: ({ name, areaM2, order }) =>
         [
           this.t("map.area_label", { name, size: this.num(areaM2) }),
@@ -673,6 +766,11 @@ export class MowPlannerCard extends LitElement {
         .language=${this.language}
         .disabled=${this.busy}
         .locked=${this.lockedSettings}
+        .angleBase=${this.angleBase}
+        .optimal=${this.optimalState}
+        @find-optimal=${() => {
+          this.askToConfirm("optimal");
+        }}
         @settings-changed=${(event: CustomEvent<{ settings: MowSettings }>) => {
           this.editSettings(event.detail.settings);
         }}
@@ -828,9 +926,11 @@ export class MowPlannerCard extends LitElement {
           ${
             kind === "route"
               ? this.t("route.confirm", { name })
-              : kind === "modify"
-                ? this.t("modify.confirm", { name, changes: summary })
-                : this.t("start.confirm", { name, areas: summary })
+              : kind === "optimal"
+                ? this.t("optimal.confirm", { name })
+                : kind === "modify"
+                  ? this.t("modify.confirm", { name, changes: summary })
+                  : this.t("start.confirm", { name, areas: summary })
           }
         </p>
         ${kind === "start" && this.active ? this.renderAlert("warning", "warn.active_job", mower) : nothing}

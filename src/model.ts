@@ -137,6 +137,8 @@ export interface AreaPreview {
   readonly perimeterLaps: readonly Ring[];
   /** Lap rings around no-go zones; open rings, drawn closed. */
   readonly obstacleLaps: readonly Ring[];
+  /** The part covered by passes, inside the laps; outer rings and holes, drawn even-odd. */
+  readonly region: readonly Ring[];
   readonly stripes: readonly Stripe[];
   /** Distance in metres between neighbouring pass lines. */
   readonly pitchM: number;

@@ -1775,6 +1775,133 @@ describe("exact route", () => {
   });
 });
 
+describe("optimal direction from a plan", () => {
+  /** Passes 0.5 m apart at `deg` across the Front square (0..20 m), as the mower's planned route. */
+  const plannedRoute = (deg: number): FeatureCollection => {
+    const u = { x: Math.cos((deg * Math.PI) / 180), y: Math.sin((deg * Math.PI) / 180) };
+    const at = (s: number, t: number) => lonLat(10 + u.x * s - u.y * t, 10 + u.y * s + u.x * t);
+    return {
+      type: "FeatureCollection",
+      features: Array.from({ length: 20 }, (_, i) => ({
+        type: "Feature",
+        properties: { type_name: "mow_path" },
+        geometry: { type: "LineString", coordinates: [at(-6, -5 + i * 0.5), at(6, -5 + i * 0.5)] },
+      })),
+    };
+  };
+
+  const optimalHass = (route: unknown, state = "docked") =>
+    lubaHass(
+      (service) => (service === "get_geojson" ? MAP : service === "get_mow_path_geojson" ? route : undefined),
+      withChanges(lubaEntities(), {
+        [LUBA]: { state },
+        "select.luba_cutting_angle_mode": {
+          state: "relative_angle",
+          attributes: { options: ["relative_angle", "absolute_angle", "random_angle"] },
+        },
+        "number.luba_cutting_angle": { state: "10" },
+      }),
+    );
+
+  const status = (card: MowPlannerCard) => textOf(panel(card).shadowRoot?.querySelector(".optimal"));
+
+  async function findOptimal(card: MowPlannerCard): Promise<void> {
+    const find = panel(card).shadowRoot?.querySelector<HTMLButtonElement>(".optimal button");
+    if (!find) throw new Error("no Find optimal direction button");
+    find.click();
+    await settle(card);
+    await armAndConfirm(card, "Ask mower");
+    await vi.advanceTimersByTimeAsync(2000);
+    await settle(card);
+  }
+
+  it("guesses the direction until asked, and says so", async () => {
+    const card = await mount(optimalHass(plannedRoute(60)));
+    await click(card, button(card, "Next"));
+
+    expect(status(card)).toBe("The preview guesses the mower's direction Find optimal direction");
+    expect(mapEl(card).note).toBe("Preview is approximate: the mower picks the final direction");
+    expect(panel(card).angleBase).toBe(0);
+  });
+
+  it("plans plain stripes at no offset after confirmation, then draws at the planned direction plus the angle", async () => {
+    const hass = optimalHass(plannedRoute(60));
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+
+    await findOptimal(card);
+
+    expect(textOf(confirmation(card))).toBe("");
+    expect(hass.calls.map((call) => call.service)).toEqual([
+      "get_geojson",
+      "start_mow",
+      "fetch_mow_path",
+      "get_mow_path_geojson",
+    ]);
+    expect(startData(hass)).toEqual([
+      { areas: [FRONT], ...LUBA_FIELDS, channel_mode: 0, toward_mode: 0, toward: 0, plan_only: true },
+    ]);
+    expect(realStarts(hass)).toEqual([]);
+    expect(status(card)).toBe("Direction from the mower's plan");
+    expect(panel(card).angleBase).toBeCloseTo(60, 3);
+    expect(mapEl(card).previews[0]?.directionDeg).toBeCloseTo(70, 3);
+    expect(mapEl(card).note).toBeUndefined();
+  });
+
+  it("shows the confirmation text before asking", async () => {
+    const hass = optimalHass(plannedRoute(60));
+    const card = await mount(hass);
+    await click(card, button(card, "Next"));
+    panel(card).shadowRoot?.querySelector<HTMLButtonElement>(".optimal button")?.click();
+    await settle(card);
+
+    expect(textOf(confirmation(card)?.querySelector("p"))).toBe(
+      "Ask Luba to plan these areas to learn its direction? It won't start mowing, but a paused job would be dropped.",
+    );
+    expect(callsTo(hass, "start_mow")).toEqual([]);
+  });
+
+  it("asks again for an area added later, keeping what it learnt", async () => {
+    const card = await mount(optimalHass(plannedRoute(60)));
+    await click(card, button(card, "Next"));
+    await findOptimal(card);
+
+    await click(card, button(card, "1Areas"));
+    await click(card, chip(card, "Back lawn"));
+    await click(card, button(card, "Next"));
+
+    expect(status(card)).toBe("The preview guesses the mower's direction Find optimal direction");
+    expect(panel(card).angleBase).toBeCloseTo(60, 3);
+  });
+
+  it("reports a plan without a usable route and offers to ask again", async () => {
+    const card = await mount(optimalHass(undefined));
+    await click(card, button(card, "Next"));
+
+    await findOptimal(card);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await settle(card);
+
+    expect(status(card)).toBe("The mower didn't share a plan Find optimal direction");
+  });
+
+  it("never asks a busy mower", async () => {
+    const hass = optimalHass(plannedRoute(60), "paused");
+    const card = await mount(hass);
+    await click(card, button(card, "2Pattern"));
+
+    expect(panel(card).shadowRoot?.querySelector(".optimal")).toBeNull();
+    expect(callsTo(hass, "start_mow")).toEqual([]);
+  });
+
+  it("turns the dial's zero by the angle offset in Custom mode", async () => {
+    const card = await mount(lubaHass(), { type: "x", angle_offset: 25 });
+    await click(card, button(card, "Next"));
+
+    expect(panel(card).angleBase).toBe(25);
+  });
+});
+
 describe("registration", () => {
   it("defines the custom element", () => {
     expect(customElements.get(CARD_TYPE)).toBe(MowPlannerCard);

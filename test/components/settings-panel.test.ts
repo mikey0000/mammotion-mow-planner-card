@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import "../../src/components/settings-panel";
+import { AngleDial } from "../../src/components/control-dial";
 import type { MowSettingsPanel } from "../../src/components/settings-panel";
 import type { MowSettings, SettingLimits } from "../../src/model";
 
@@ -362,28 +363,6 @@ describe("<mow-planner-settings> interaction", () => {
     expect(controls.every((c) => c.disabled)).toBe(true);
   });
 
-  it("rotates the dial with the angle", async () => {
-    const { el } = await mount();
-    const transform = () => one(shadow(el), ".dial .stripes", Element).getAttribute("transform");
-    expect(transform()).toBe("rotate(-30)");
-    el.settings = { ...settings, angle: -45 };
-    await settle(el);
-    expect(transform()).toBe("rotate(45)");
-  });
-
-  it("marks the compass directions on the dial for a custom angle", async () => {
-    const { el } = await mount();
-    expect(shadow(el).querySelectorAll(".dial .ticks line")).toHaveLength(4);
-    expect(shadow(el).querySelector(".dial .baseline")).toBeNull();
-  });
-
-  it("draws the dial as an offset from the optimal direction in Optimal mode", async () => {
-    const { el } = await mount({ settings: { angleMode: "relative_angle", angle: 15 } });
-    expect(shadow(el).querySelector(".dial .ticks")).toBeNull();
-    expect(shadow(el).querySelector(".dial .baseline")).not.toBeNull();
-    expect(one(shadow(el), ".dial .stripes", Element).getAttribute("transform")).toBe("rotate(-15)");
-  });
-
   it("fires a bubbling, composed event", async () => {
     const { el } = await mount();
     let seen: Event | undefined;
@@ -490,5 +469,73 @@ describe("<mow-planner-settings> locked settings", () => {
   it("opens More settings while settings are locked, where most changeable ones are", async () => {
     const { el } = await mount({}, { locked });
     expect(one(shadow(el), "details", HTMLDetailsElement).open).toBe(true);
+  });
+});
+
+describe("<mow-planner-settings> dial", () => {
+  const dial = (el: Element) => one(shadow(el), "mow-planner-dial", AngleDial);
+
+  it("sits beside the angle slider with one hand for stripes", async () => {
+    const { el } = await mount();
+    const d = dial(el);
+    expect(d.closest(".angles")?.querySelector("mow-planner-slider")).not.toBeNull();
+    expect(d.angle).toBe(30);
+    expect(d.crossAngle).toBeUndefined();
+    expect(d.reference).toBe(false);
+  });
+
+  it("adds the crossing hand for the grid pattern and turns the base for the angle offset", async () => {
+    const { el } = await mount({ settings: { pattern: "double_grid", crossAngle: 70 } }, { angleBase: 12 });
+    expect(dial(el).crossAngle).toBe(70);
+    expect(dial(el).base).toBe(12);
+  });
+
+  it("marks the optimal direction in Optimal mode and has no dial in random mode", async () => {
+    expect(dial((await mount({ settings: { angleMode: "relative_angle" } })).el).reference).toBe(true);
+    const { el } = await mount({ settings: { angleMode: "random_angle", pattern: "double_grid" } });
+    expect(shadow(el).querySelector("mow-planner-dial")).toBeNull();
+    expect(sliderLabels(el)).toContain("Crossing angle");
+  });
+
+  it("turns a dial hand into a settings change, like the slider", async () => {
+    const { el, events } = await mount({ settings: { pattern: "double_grid" } });
+    dial(el).dispatchEvent(new CustomEvent("value-changed", { detail: { hand: "crossAngle", value: 60 } }));
+    dial(el).dispatchEvent(new CustomEvent("value-changed", { detail: { hand: "angle", value: -15 } }));
+    expect(events.map((s) => [s.angle, s.crossAngle])).toEqual([
+      [30, 60],
+      [-15, 90],
+    ]);
+  });
+
+  it("greys out the dial while the angle is locked", async () => {
+    const { el } = await mount({}, { locked: ["angle", "crossAngle"] });
+    expect(dial(el).disabled).toBe(true);
+  });
+});
+
+describe("<mow-planner-settings> optimal direction", () => {
+  const status = (el: Element) => shadow(el).querySelector(".optimal");
+
+  it("offers finding the direction while it is guessed, and after a failure", async () => {
+    for (const optimal of ["approximate", "failed"] as const) {
+      const { el } = await mount({ settings: { angleMode: "relative_angle" } }, { optimal });
+      let asked = 0;
+      el.addEventListener("find-optimal", () => (asked += 1));
+      one(status(el) ?? el, "button", HTMLButtonElement).click();
+      expect(asked).toBe(1);
+    }
+  });
+
+  it("says where the direction comes from, without a button while asking or once found", async () => {
+    const asking = (await mount({ settings: { angleMode: "relative_angle" } }, { optimal: "finding" })).el;
+    expect(status(asking)?.textContent).toContain("Asking the mower for its plan");
+    expect(status(asking)?.querySelector("button")).toBeNull();
+    const found = (await mount({ settings: { angleMode: "relative_angle" } }, { optimal: "found" })).el;
+    expect(status(found)?.textContent).toContain("Direction from the mower's plan");
+  });
+
+  it("shows nothing outside Optimal mode or when not offered", async () => {
+    expect(status((await mount({}, { optimal: "approximate" })).el)).toBeNull();
+    expect(status((await mount({ settings: { angleMode: "relative_angle" } })).el)).toBeNull();
   });
 });
