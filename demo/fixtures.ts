@@ -154,10 +154,8 @@ interface DemoMower {
   readonly switches: Readonly<Record<string, boolean>>;
   /** Grass collector models only. */
   readonly dumpInterval?: number;
-  /** Job progress in percent. */
-  readonly progress: number;
-  /** The `running_job` attribute; left out to stand for an integration that predates it. */
-  readonly runningJob?: Readonly<Record<string, unknown>> | null;
+  /** The `running_job` attribute: the job under way, or null. */
+  readonly runningJob: Readonly<Record<string, unknown>> | null;
   readonly features: Feature[];
   /** The direction the demo mower plans each area in, by area name, for Optimal mode. */
   readonly optimal?: Readonly<Record<string, number>>;
@@ -176,7 +174,6 @@ const MOWERS: readonly DemoMower[] = [
     angleModes: ["relative_angle", "absolute_angle", "random_angle"],
     detection: ["off", "standard", "sensitive"],
     switches: {},
-    progress: 0,
     runningJob: null,
     features: GARDEN,
     optimal: { "Front lawn": 30, "Back lawn": 75, "Side strip": 0 },
@@ -192,7 +189,6 @@ const MOWERS: readonly DemoMower[] = [
     angleModes: ["relative_angle", "absolute_angle", "random_angle"],
     detection: ["off", "standard", "sensitive"],
     switches: { auto_change_direction: false },
-    progress: 42,
     runningJob: {
       areas: [5500000000001],
       toward: 15,
@@ -219,7 +215,7 @@ const MOWERS: readonly DemoMower[] = [
     slug: "yuka",
     name: "Yuka",
     model: "Yuka 1500",
-    state: "paused",
+    state: "docked",
     battery: 100,
     position: [-21, -14.4],
     spacing: [20, 35, 25],
@@ -227,14 +223,15 @@ const MOWERS: readonly DemoMower[] = [
     detection: ["off", "slow_touch", "less_touch", "standard"],
     switches: { is_mow: true, is_dump: true, is_edge: false },
     dumpInterval: 20,
-    progress: 30,
+    runningJob: null,
     features: GARDEN,
   },
 ];
 
 const LAPS = ["none", "one", "two", "three", "four"];
 
-function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntry][] {
+/** `old` stands for an integration before 0.6.25: no running-job attributes and no area order. */
+function mowerEntities(mower: DemoMower, old: boolean): [HassEntity, EntityRegistryDisplayEntry][] {
   const device_id = `device_${mower.slug}`;
   const entity = (
     entity_id: string,
@@ -258,10 +255,7 @@ function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntr
   return [
     entity(`lawn_mower.${mower.slug}`, undefined, mower.state, {
       friendly_name: mower.name,
-      ...(mower.runningJob !== undefined && {
-        running_job: mower.runningJob,
-        running_job_modifiable: mower.runningJob !== null,
-      }),
+      ...(!old && { running_job: mower.runningJob, running_job_modifiable: mower.runningJob !== null }),
     }),
     entity(`device_tracker.${mower.slug}`, "device_tracker", "home", {
       latitude: lat,
@@ -285,7 +279,6 @@ function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntr
         friendly_name: `${mower.name} ${key}`,
       }),
     ),
-    entity(`sensor.${mower.slug}_progress`, "progress", String(mower.progress), { unit_of_measurement: "%" }),
     number("cutting_angle", 0, -180, 180, 1),
     number("toward_included_angle", 90, -180, 180, 1),
     number("path_spacing", mower.spacing[2], mower.spacing[0], mower.spacing[1], 1),
@@ -301,8 +294,7 @@ function mowerEntities(mower: DemoMower): [HassEntity, EntityRegistryDisplayEntr
         return entity(`switch.${mower.slug}_area_${index + 1}`, "area_plain", index === 0 ? "on" : "off", {
           hash,
           friendly_name: `${mower.name} ${Name}`,
-          // An integration that reports the running job (0.6.25) also keeps the mowing order.
-          ...(mower.runningJob !== undefined && { order: index === 0 ? 1 : null }),
+          ...(!old && { order: index === 0 ? 1 : null }),
         });
       }),
   ];
@@ -325,8 +317,10 @@ export interface DemoOptions {
   /** `empty` simulates a mower that has no map yet; `error` a failing integration. */
   readonly map?: "ready" | "empty" | "error";
   readonly singleMower?: boolean;
-  /** Stands for an integration from before `mammotion.plan_route`. */
-  readonly legacy?: boolean;
+  /** Stands for an integration older than 0.6.25, which the card asks to update. */
+  readonly old?: boolean;
+  /** Makes `start_mow` fail, to try a failed start. */
+  readonly failStart?: boolean;
   /** Entities saved by earlier visits, by entity id. */
   readonly saved?: Readonly<Record<string, SavedEntity>>;
   /** Called with the new `hass` and the entities that changed, as Home Assistant pushes a new one. */
@@ -343,7 +337,7 @@ const serviceError = (code: string, message: string): Promise<never> =>
 /** A `hass` whose services are recorded, never executed. */
 export function demoHass(options: DemoOptions): HomeAssistant {
   const mowers = options.singleMower ? MOWERS.slice(0, 1) : MOWERS;
-  const pairs = mowers.flatMap(mowerEntities);
+  const pairs = mowers.flatMap((mower) => mowerEntities(mower, options.old ?? false));
   const language = options.language ?? "en";
   const ACTIVE = ["mowing", "paused", "returning"];
   let states: Record<string, HassEntity> = Object.fromEntries(
@@ -407,6 +401,21 @@ export function demoHass(options: DemoOptions): HomeAssistant {
       }),
     );
   };
+  /** The job a start set going, reported a moment later like the integration's `running_job`. */
+  const startJob = (mowerId: string, data: Record<string, unknown>) => {
+    const entity = states[mowerId];
+    if (!entity) return;
+    const ids = Array.isArray(data.areas) ? (data.areas as string[]) : [];
+    const areas = ids.map((id) => states[id]?.attributes.hash);
+    const attributes = {
+      ...entity.attributes,
+      running_job: { ...data, areas },
+      running_job_modifiable: true,
+    };
+    const changed = { [mowerId]: { ...entity, state: "mowing", attributes } };
+    states = { ...states, ...changed };
+    options.onChange?.(build(), changed);
+  };
   const build = (): HomeAssistant => ({ ...base, states });
   const base: Omit<HomeAssistant, "states"> = {
     entities: Object.fromEntries(pairs.map(([, entry]) => [entry.entity_id, entry])),
@@ -422,7 +431,7 @@ export function demoHass(options: DemoOptions): HomeAssistant {
     translationMetadata: { translations: { he: { isRTL: true }, ar: { isRTL: true } } },
     services: {
       mammotion: Object.fromEntries(
-        ["get_geojson", "start_mow", "modify_running_job", ...(options.legacy ? [] : ["plan_route"])].map(
+        ["get_geojson", "start_mow", "modify_running_job", ...(options.old ? [] : ["plan_route"])].map(
           (name) => [name, {}],
         ),
       ),
@@ -444,6 +453,14 @@ export function demoHass(options: DemoOptions): HomeAssistant {
         // An entity service answers by entity id, even for one entity.
         const route = { ...plannedRoute(mower), plan: { path_hash: "4242", toward: 0, toward_mode: 0 } };
         return { response: { [`lawn_mower.${mower.slug}`]: route } };
+      }
+      if (service === "start_mow" && mower) {
+        if (options.failStart)
+          return serviceError("home_assistant_error", `${mower.name} could not start the job.`);
+        setTimeout(() => {
+          startJob(`lawn_mower.${mower.slug}`, data);
+        }, 2000);
+        return {};
       }
       if (service !== "get_geojson") return {};
       if (options.map === "error") throw new Error("Demo: the integration did not answer");

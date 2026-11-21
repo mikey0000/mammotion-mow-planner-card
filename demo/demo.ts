@@ -59,7 +59,8 @@ const options: DemoOptions = {
   language: params.get("lang") ?? "en",
   map: (params.get("map") as DemoOptions["map"]) ?? "ready",
   singleMower: params.has("single"),
-  legacy: params.has("legacy"),
+  old: params.has("old"),
+  failStart: params.has("failstart"),
   failWrites: params.has("failsave"),
   saved,
   onChange: (hass, changed) => {
