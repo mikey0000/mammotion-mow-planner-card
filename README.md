@@ -3,7 +3,7 @@
 A Home Assistant dashboard card for the [Mammotion integration](https://github.com/mikey0000/Mammotion-HA). Pick the areas to mow on the map, set the pattern, and see what the mow will look like before you start it.
 
 - **Areas.** Tap areas on the map or in the list. They are mowed in the order you tap them.
-- **Pattern.** Change the path angle, pattern, path spacing, perimeter laps and no-go zone laps, and watch the stripes redraw on the map as you drag. **More settings** holds speed, cutting height, edge coverage, obstacle detection, auto-reverse direction, start progress and, on Yuka models with a grass collector, the collection settings.
+- **Pattern.** Change the path angle, pattern, path spacing, perimeter laps and no-go zone laps, and watch the stripes redraw on the map as you drag. Turn the path angle with the clock dial beside the angle sliders: drag a hand, or focus it and use the arrow keys (Shift for 15° steps). **Grid** adds a second hand for the crossing angle, which turns along with the first. **More settings** holds speed, cutting height, edge coverage, obstacle detection, auto-reverse direction, start progress and, on Yuka models with a grass collector, the collection settings.
 - **Review.** Check the summary, the path length and the estimated time, then start the job.
 
 The card shows a setting only when your mower has the matching integration entity, and takes its range or choices from that entity, so each model gets the settings it actually has.
@@ -50,22 +50,22 @@ The card works best at half a dashboard width or more. On a wide card the map si
 
 The preview is computed in the browser from the map and your settings. It is a faithful sketch, not the mower's own plan.
 
-- **Path spacing** is drawn to scale. When passes would be too close together to tell apart on screen, the map draws every n-th pass and says so; zoom in to see them all.
+- Passes are drawn as mown bands, light and dark like a striped lawn, each one path spacing wide at the map's scale. When one pass would be too thin to see, several are grouped into one band and the map says how many; zoom in to see each pass.
 - **Perimeter laps** are rings inside the boundary, one path spacing apart. **No-go zone laps** are rings around each no-go zone.
-- **Grid** adds a second pass at the crossing angle. **Adaptive** is drawn as plain stripes, because the mower splits the area into zones itself. **Perimeter** has no stripes.
+- **Grid** adds a second pass at the crossing angle, so the bands overlap into a check. **Adaptive** is drawn as plain stripes, because the mower splits the area into zones itself. **Perimeter** has no stripes.
 - The estimated time is path length divided by speed. It ignores turns, travel between areas and charging, so expect the real job to take longer.
 
 ### Path angle
 
 - **Custom** uses your angle as a fixed direction on the map: 0° runs east–west, 90° north–south.
-- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. The card guesses that direction from the long side of each area and marks the preview as approximate.
+- **Optimal** lets the mower choose the efficient direction, and your angle shifts it. Until you ask, the card guesses that direction from the long side of each area and marks the preview as approximate. **Find optimal direction** asks the mower, after you confirm, to plan plain stripes over the selected areas without mowing; the card reads the direction of each area off that plan and draws the bands and the dial from it. The answer is kept per area until the map is refreshed. The card never asks while the mower is busy, because planning drops a paused job.
 - **Random** changes direction every job. The card shows one example.
 
 The mower measures custom angles in its own map frame, which can be rotated from true north. If the stripes on your lawn end up turned compared with the preview, set `angle_offset` to the difference.
 
 ## Limits
 
-- The preview cannot show the route the mower will actually take. `exact_route: true` adds a button that, after you confirm, asks the mower to plan the job without starting and then fetches that route. Planning drops a paused job on the mower. It depends on integration behaviour that is not reliable yet, so it may report that the mower shared no route, or show the route of an earlier job.
+- The preview cannot show the route the mower will actually take. `exact_route: true` adds a button that, after you confirm, asks the mower to plan the job without starting and then fetches that route. Planning drops a paused job on the mower. It depends on integration behaviour that is not reliable yet, so it may report that the mower shared no route, or show the route of an earlier job. **Find optimal direction** uses the same plan and route fetch, with the same caveat: an earlier job's route over the same areas would give that job's direction.
 - A setting whose entity is missing or has no value is left out of the start command unless you change it, so the job uses the integration's own value.
 - Obstacle detection is offered only when its entity lists one of the option sets the integration is known to produce, because the code sent for **Off** differs between them.
 - Starting a job while the mower is busy without a job to change, such as on its way home from a finished one, ends what it is doing first. The card warns you in the review step.
